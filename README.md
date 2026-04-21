@@ -32,6 +32,8 @@
 - `manifest.json`, `index.js`, `index.html`, `style.css`: 프런트 확장 파일
 - `server-plugin/aws-bedrock-bridge`: 서버 플러그인 번들
 - `install-server-plugin.ps1`: Windows 데스크톱에서 서버 플러그인을 SillyTavern에 복사하는 설치 스크립트
+- `install-server-plugin-termux.sh`: Termux에서 서버 플러그인 복사, 의존성 설치, CSRF 예외 패치까지 처리하는 스크립트
+- `termux-install.txt`: 모바일에서 한 줄씩 따라 치는 설치 메모
 
 ## 서버 플러그인 설치
 
@@ -54,6 +56,8 @@
 
 1. 데스크톱에서 `install-server-plugin.ps1`를 한 번 실행
 2. 파일 관리자나 쉘로 `server-plugin/aws-bedrock-bridge`를 직접 `plugins/aws-bedrock-bridge`로 복사
+
+모바일에서는 이것만으로 끝나지 않습니다. Bedrock 브리지 경로는 SillyTavern 본체의 CSRF 예외에도 포함되어야 하므로, Termux에서는 `install-server-plugin-termux.sh`를 실행하거나 `termux-install.txt`의 `server-main.js` 패치 단계까지 같이 적용해야 합니다.
 
 ## 사용 순서
 
