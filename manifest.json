@@ -1,0 +1,11 @@
+{
+    "display_name": "AWS Bedrock Connection",
+    "loading_order": 12,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "GitHub Copilot",
+    "version": "0.1.0",
+    "homePage": "https://github.com/SillyTavern/SillyTavern"
+}

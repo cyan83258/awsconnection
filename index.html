@@ -1,0 +1,134 @@
+<div class="aws-bedrock-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>AWS Bedrock Connection</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="aws-bedrock-note">
+                SillyTavern 내부 서버 플러그인을 통해 AWS Bedrock를 OpenAI Custom provider로 연결합니다.
+            </div>
+
+            <label class="aws-bedrock-toggle" for="aws_bedrock_enabled">
+                <input id="aws_bedrock_enabled" type="checkbox">
+                <span>Bedrock 연결 활성화</span>
+            </label>
+
+            <label for="aws_bedrock_region">AWS Region</label>
+            <input id="aws_bedrock_region" class="text_pole" type="text" placeholder="예: us-east-1">
+
+            <label for="aws_bedrock_access_key_id">Access Key ID</label>
+            <input id="aws_bedrock_access_key_id" class="text_pole" type="password" placeholder="AKIA...">
+
+            <label for="aws_bedrock_secret_access_key">Secret Access Key</label>
+            <input id="aws_bedrock_secret_access_key" class="text_pole" type="password" placeholder="AWS Secret Access Key">
+
+            <label for="aws_bedrock_session_token">Session Token (optional)</label>
+            <input id="aws_bedrock_session_token" class="text_pole" type="password" placeholder="임시 자격 증명일 때만 입력">
+
+            <div class="aws-bedrock-actions">
+                <button id="aws_bedrock_save" class="menu_button">저장</button>
+                <button id="aws_bedrock_clear_credentials" class="menu_button">자격 증명 삭제</button>
+                <button id="aws_bedrock_load_models" class="menu_button">모델 불러오기</button>
+            </div>
+
+            <div id="aws_bedrock_credentials_state" class="aws-bedrock-note aws-bedrock-subnote">
+                저장된 자격 증명 상태를 확인하는 중입니다.
+            </div>
+
+            <label for="aws_bedrock_model">Bedrock Model</label>
+            <select id="aws_bedrock_model" class="text_pole">
+                <option value="">먼저 모델 목록을 불러오세요</option>
+            </select>
+
+            <label for="aws_bedrock_inference_profile_id">Inference Profile ID/ARN (optional)</label>
+            <input id="aws_bedrock_inference_profile_id" class="text_pole" type="text" placeholder="예: arn:aws:bedrock:... 또는 us.anthropic...">
+            <div class="aws-bedrock-note aws-bedrock-subnote">
+                Claude Opus 4.6처럼 on-demand 호출이 막힌 모델은 여기에 inference profile ID 또는 ARN을 넣어야 합니다.
+            </div>
+
+            <label for="aws_bedrock_thinking_effort">Adaptive Thinking</label>
+            <select id="aws_bedrock_thinking_effort" class="text_pole">
+                <option value="max">max</option>
+                <option value="high">high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+            </select>
+            <div class="aws-bedrock-note aws-bedrock-subnote">
+                문서 기준 adaptive thinking만 지원합니다. Claude 4.6 계열에서만 전송되며, max는 Claude Opus 4.6에서만 지원됩니다.
+            </div>
+
+            <label for="aws_bedrock_service_tier">Service Tier</label>
+            <select id="aws_bedrock_service_tier" class="text_pole">
+                <option value="reserved">reserved</option>
+                <option value="priority">priority</option>
+                <option value="default">default</option>
+                <option value="flex">flex</option>
+            </select>
+
+            <div class="aws-bedrock-actions">
+                <button id="aws_bedrock_apply" class="menu_button">SillyTavern에 적용</button>
+                <button id="aws_bedrock_connect" class="menu_button">연결 확인</button>
+            </div>
+
+            <div class="aws-bedrock-actions">
+                <button id="aws_bedrock_verify" class="menu_button">적용 상태 확인</button>
+                <button id="aws_bedrock_refresh_state" class="menu_button">상태 새로고침</button>
+            </div>
+
+            <div class="aws-bedrock-inspect">
+                <div class="aws-bedrock-inspect-row">
+                    <span>저장된 연결 상태</span>
+                    <strong id="aws_bedrock_inspect_enabled">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>저장된 Thinking</span>
+                    <strong id="aws_bedrock_inspect_thinking">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>저장된 Service Tier</span>
+                    <strong id="aws_bedrock_inspect_service_tier">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>마지막 검사 시각</span>
+                    <strong id="aws_bedrock_inspect_time">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>마지막 모델</span>
+                    <strong id="aws_bedrock_inspect_model">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>Thinking 전송 결과</span>
+                    <strong id="aws_bedrock_inspect_thinking_applied">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>Service Tier 응답</span>
+                    <strong id="aws_bedrock_inspect_service_tier_applied">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>Reasoning 감지</span>
+                    <strong id="aws_bedrock_inspect_reasoning">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>Reasoning 서명</span>
+                    <strong id="aws_bedrock_inspect_reasoning_signature">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-block">
+                    <span>Reasoning 미리보기</span>
+                    <div id="aws_bedrock_inspect_reasoning_preview" class="aws-bedrock-inspect-note">아직 reasoning 기록이 없습니다.</div>
+                </div>
+                <div class="aws-bedrock-inspect-block">
+                    <span>적용 메모</span>
+                    <div id="aws_bedrock_inspect_note" class="aws-bedrock-inspect-note">아직 검사 기록이 없습니다.</div>
+                </div>
+            </div>
+
+            <div class="aws-bedrock-endpoint-row">
+                <label>Bridge Endpoint</label>
+                <input id="aws_bedrock_endpoint" class="text_pole" type="text" readonly>
+            </div>
+
+            <small id="aws_bedrock_status" class="aws-bedrock-status">초기화 중...</small>
+        </div>
+    </div>
+</div>

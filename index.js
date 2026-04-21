@@ -1,0 +1,559 @@
+import { getRequestHeaders, saveSettingsDebounced } from '../../../../script.js';
+import { extension_settings } from '../../../extensions.js';
+import { chat_completion_sources, oai_settings } from '../../../openai.js';
+
+const extensionName = 'aws-connection';
+const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
+const pluginBasePath = '/api/plugins/aws-bedrock-bridge';
+
+const defaultSettings = {
+    enabled: true,
+    region: 'us-east-1',
+    selectedModel: '',
+    inferenceProfileId: '',
+    thinkingEffort: 'high',
+    serviceTier: 'default',
+};
+
+const fallbackModels = [
+    'anthropic.claude-3-5-haiku-20241022-v1:0',
+    'anthropic.claude-3-5-sonnet-20241022-v2:0',
+    'anthropic.claude-3-7-sonnet-20250219-v1:0',
+    'anthropic.claude-sonnet-4-20250514-v1:0',
+    'anthropic.claude-sonnet-4-6-v1',
+    'anthropic.claude-opus-4-20250514-v1:0',
+    'anthropic.claude-opus-4-6-v1',
+].map(id => ({
+    id,
+    object: 'model',
+    bedrock: {
+        provider: 'Anthropic',
+        fallback: true,
+    },
+}));
+
+let extensionSettings = extension_settings[extensionName];
+if (!extensionSettings) {
+    extensionSettings = {};
+    extension_settings[extensionName] = extensionSettings;
+}
+
+function loadSettings() {
+    for (const [key, value] of Object.entries(defaultSettings)) {
+        if (!Object.prototype.hasOwnProperty.call(extensionSettings, key)) {
+            extensionSettings[key] = value;
+        }
+    }
+
+    $('#aws_bedrock_enabled').prop('checked', extensionSettings.enabled !== false);
+    $('#aws_bedrock_region').val(extensionSettings.region || defaultSettings.region);
+    $('#aws_bedrock_inference_profile_id').val(extensionSettings.inferenceProfileId || defaultSettings.inferenceProfileId);
+    $('#aws_bedrock_thinking_effort').val(extensionSettings.thinkingEffort || defaultSettings.thinkingEffort);
+    $('#aws_bedrock_service_tier').val(extensionSettings.serviceTier || defaultSettings.serviceTier);
+    $('#aws_bedrock_endpoint').val(getBridgeUrl());
+}
+
+function saveExtensionSettings() {
+    extensionSettings.enabled = $('#aws_bedrock_enabled').is(':checked');
+    extensionSettings.region = String($('#aws_bedrock_region').val() || defaultSettings.region).trim() || defaultSettings.region;
+    extensionSettings.selectedModel = String($('#aws_bedrock_model').val() || '').trim();
+    extensionSettings.inferenceProfileId = String($('#aws_bedrock_inference_profile_id').val() || '').trim();
+    extensionSettings.thinkingEffort = String($('#aws_bedrock_thinking_effort').val() || defaultSettings.thinkingEffort).trim() || defaultSettings.thinkingEffort;
+    extensionSettings.serviceTier = String($('#aws_bedrock_service_tier').val() || defaultSettings.serviceTier).trim() || defaultSettings.serviceTier;
+    saveSettingsDebounced();
+}
+
+function inferModelFromInferenceProfile(profileId) {
+    const profile = String(profileId || '').trim().toLowerCase();
+    if (!profile) {
+        return '';
+    }
+
+    if (profile.includes('claude-opus-4-6-v1')) {
+        return 'anthropic.claude-opus-4-6-v1';
+    }
+
+    if (profile.includes('claude-sonnet-4-6-v1')) {
+        return 'anthropic.claude-sonnet-4-6-v1';
+    }
+
+    return '';
+}
+
+async function syncPluginConfig() {
+    saveExtensionSettings();
+
+    return await fetchPlugin('/config', {
+        method: 'POST',
+        body: {
+            enabled: extensionSettings.enabled,
+            region: extensionSettings.region,
+            selectedModel: extensionSettings.selectedModel,
+            inferenceProfileId: extensionSettings.inferenceProfileId,
+            thinkingEffort: extensionSettings.thinkingEffort,
+            serviceTier: extensionSettings.serviceTier,
+        },
+    });
+}
+
+function getBridgeUrl() {
+    return `${window.location.origin}${pluginBasePath}/v1`;
+}
+
+function setStatus(message, isError = false) {
+    const status = $('#aws_bedrock_status');
+    status.text(message);
+    status.toggleClass('error', isError);
+}
+
+function renderCredentialState(config) {
+    const credentialState = config?.credentialState || {};
+    const notes = [];
+
+    const accessKeyPlaceholder = credentialState.accessKeyId || 'AKIA...';
+    const secretKeyPlaceholder = credentialState.secretAccessKey || 'AWS Secret Access Key';
+    const sessionTokenPlaceholder = credentialState.sessionToken || '임시 자격 증명일 때만 입력';
+
+    $('#aws_bedrock_access_key_id').attr('placeholder', accessKeyPlaceholder);
+    $('#aws_bedrock_secret_access_key').attr('placeholder', secretKeyPlaceholder);
+    $('#aws_bedrock_session_token').attr('placeholder', sessionTokenPlaceholder);
+
+    if (config?.hasAccessKeyId) {
+        notes.push(`Access Key 저장됨 (${credentialState.accessKeyId || '마스킹됨'})`);
+    } else {
+        notes.push('Access Key 미저장');
+    }
+
+    if (config?.hasSecretAccessKey) {
+        notes.push(`Secret Key 저장됨 (${credentialState.secretAccessKey || '마스킹됨'})`);
+    } else {
+        notes.push('Secret Key 미저장');
+    }
+
+    if (config?.hasSessionToken) {
+        notes.push(`Session Token 저장됨 (${credentialState.sessionToken || '마스킹됨'})`);
+    } else {
+        notes.push('Session Token 없음');
+    }
+
+    $('#aws_bedrock_credentials_state').text(notes.join(' | '));
+}
+
+function formatDateTime(value) {
+    if (!value) {
+        return '-';
+    }
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return String(value);
+    }
+
+    return date.toLocaleString();
+}
+
+function renderInspection(payload) {
+    const config = payload?.config || {};
+    const lastInvocation = payload?.lastInvocation || null;
+    const appliedThinking = lastInvocation?.applied?.thinking;
+    const appliedServiceTier = lastInvocation?.response?.serviceTier || lastInvocation?.applied?.serviceTier?.type || null;
+    const requestedServiceTier = lastInvocation?.applied?.serviceTier?.type || config.serviceTier || defaultSettings.serviceTier;
+    const reasoningDetected = lastInvocation?.response?.reasoningDetected;
+    const reasoningBlockCount = lastInvocation?.response?.reasoningBlockCount || 0;
+    const reasoningSignatureDetected = lastInvocation?.response?.reasoningSignatureDetected;
+    const reasoningPreview = lastInvocation?.response?.reasoningPreview || '';
+    const noteParts = [];
+
+    $('#aws_bedrock_inspect_enabled').text(config.enabled === false ? 'OFF' : 'ON');
+    $('#aws_bedrock_inspect_thinking').text(config.thinkingEffort || defaultSettings.thinkingEffort);
+    $('#aws_bedrock_inspect_service_tier').text(config.serviceTier || defaultSettings.serviceTier);
+    $('#aws_bedrock_inspect_time').text(formatDateTime(lastInvocation?.requestedAt));
+    $('#aws_bedrock_inspect_model').text(lastInvocation?.modelId || config.selectedModel || '-');
+
+    if (appliedThinking?.sent) {
+        $('#aws_bedrock_inspect_thinking_applied').text(`adaptive:${appliedThinking.effort || config.thinkingEffort || defaultSettings.thinkingEffort}`);
+    } else {
+        $('#aws_bedrock_inspect_thinking_applied').text(appliedThinking?.reason || '전송 기록 없음');
+    }
+
+    $('#aws_bedrock_inspect_service_tier_applied').text(appliedServiceTier ? `요청 ${requestedServiceTier} / 응답 ${appliedServiceTier}` : `요청 ${requestedServiceTier} / 응답 미확인`);
+    $('#aws_bedrock_inspect_reasoning').text(reasoningDetected ? `감지됨 (${reasoningBlockCount}개)` : '감지 안 됨');
+    $('#aws_bedrock_inspect_reasoning_signature').text(reasoningDetected ? (reasoningSignatureDetected ? '있음' : '없음') : '-');
+    $('#aws_bedrock_inspect_reasoning_preview').text(reasoningPreview || 'adaptive thinking은 effort가 낮거나 질문이 단순하면 reasoning을 생략할 수 있습니다.');
+
+    if (config.configured === false) {
+        noteParts.push('AWS 자격 증명이 아직 저장되지 않았습니다.');
+    }
+
+    if (lastInvocation?.source) {
+        noteParts.push(`마지막 요청 종류: ${lastInvocation.source}`);
+    }
+
+    if (lastInvocation?.invocationModelId && lastInvocation.invocationModelId !== lastInvocation.modelId) {
+        noteParts.push(`실제 호출 대상: ${lastInvocation.invocationModelId}`);
+    } else if (config.inferenceProfileId) {
+        noteParts.push(`저장된 inference profile: ${config.inferenceProfileId}`);
+    }
+
+    if (appliedThinking?.reason) {
+        noteParts.push(appliedThinking.reason);
+    }
+
+    if (appliedThinking?.sent) {
+        noteParts.push(`thinking.type=adaptive, effort=${appliedThinking.effort}`);
+        noteParts.push('일반 채팅 응답은 OpenAI 호환 형식으로 변환되므로 reasoning 본문은 채팅창에 직접 표시되지 않습니다. 적용 상태 확인에서만 raw reasoning 흔적을 볼 수 있습니다.');
+    }
+
+    if (requestedServiceTier) {
+        noteParts.push(`service tier 요청값: ${requestedServiceTier}`);
+    }
+
+    if (appliedServiceTier) {
+        noteParts.push(`service tier 응답값: ${appliedServiceTier}`);
+    } else if (requestedServiceTier) {
+        noteParts.push('이번 응답에는 resolved service tier가 포함되지 않아 요청값만 확인했습니다. 속도만으로 flex 여부를 판단하면 안 됩니다.');
+    }
+
+    if (lastInvocation?.response?.reasoningRedacted) {
+        noteParts.push('reasoning 일부가 provider에 의해 redacted 되었습니다.');
+    }
+
+    if (lastInvocation?.response?.performanceLatency) {
+        noteParts.push(`응답 latency profile: ${lastInvocation.response.performanceLatency}`);
+    }
+
+    if (lastInvocation?.response?.stopReason) {
+        noteParts.push(`stop reason: ${lastInvocation.response.stopReason}`);
+    }
+
+    if (lastInvocation?.response?.textPreview) {
+        noteParts.push(`미리보기: ${lastInvocation.response.textPreview}`);
+    }
+
+    if (Array.isArray(lastInvocation?.applied?.requestAdjustments) && lastInvocation.applied.requestAdjustments.length > 0) {
+        noteParts.push(...lastInvocation.applied.requestAdjustments);
+    }
+
+    $('#aws_bedrock_inspect_note').text(noteParts.length > 0 ? noteParts.join(' | ') : '아직 검사 기록이 없습니다.');
+}
+
+async function fetchPlugin(path, options = {}) {
+    const hasBody = options.body !== undefined;
+    const response = await fetch(`${pluginBasePath}${path}`, {
+        method: options.method || 'GET',
+        headers: {
+            ...getRequestHeaders(),
+            ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+            ...(options.headers || {}),
+        },
+        body: hasBody ? JSON.stringify(options.body) : undefined,
+    });
+
+    if (!response.ok) {
+        let message = `요청 실패 (${response.status})`;
+        const responseText = await response.text();
+
+        if (responseText) {
+            try {
+                const payload = JSON.parse(responseText);
+                message = payload?.error?.message || payload?.message || responseText || message;
+            } catch {
+                message = responseText;
+            }
+        }
+
+        throw new Error(message);
+    }
+
+    if (response.status === 204) {
+        return null;
+    }
+
+    const responseText = await response.text();
+    if (!responseText) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(responseText);
+    } catch {
+        throw new Error('플러그인 응답을 해석하지 못했습니다.');
+    }
+}
+
+async function loadConfig() {
+    try {
+        const config = await fetchPlugin('/config');
+        extensionSettings.enabled = config.enabled !== false;
+        extensionSettings.region = config.region || extensionSettings.region || defaultSettings.region;
+        extensionSettings.selectedModel = config.selectedModel || extensionSettings.selectedModel || inferModelFromInferenceProfile(config.inferenceProfileId);
+        extensionSettings.inferenceProfileId = config.inferenceProfileId || extensionSettings.inferenceProfileId || defaultSettings.inferenceProfileId;
+        extensionSettings.thinkingEffort = config.thinkingEffort || extensionSettings.thinkingEffort || defaultSettings.thinkingEffort;
+        extensionSettings.serviceTier = config.serviceTier || extensionSettings.serviceTier || defaultSettings.serviceTier;
+        $('#aws_bedrock_region').val(extensionSettings.region);
+        $('#aws_bedrock_enabled').prop('checked', extensionSettings.enabled);
+        $('#aws_bedrock_inference_profile_id').val(extensionSettings.inferenceProfileId);
+        $('#aws_bedrock_thinking_effort').val(extensionSettings.thinkingEffort);
+        $('#aws_bedrock_service_tier').val(extensionSettings.serviceTier);
+        renderCredentialState(config);
+        populateFallbackModels();
+        saveSettingsDebounced();
+        $('#aws_bedrock_endpoint').val(getBridgeUrl());
+        renderInspection({ config });
+        await refreshInspection(false);
+        setStatus(config.configured ? 'AWS 자격 증명이 저장되어 있습니다.' : 'AWS 자격 증명을 저장하세요.');
+    } catch (error) {
+        populateFallbackModels('플러그인에 연결하지 못해 내장 모델 목록으로 초기화했습니다.');
+        setStatus(`플러그인에 연결할 수 없습니다: ${error.message}`, true);
+    }
+}
+
+async function refreshInspection(showStatus = true) {
+    const payload = await fetchPlugin('/inspect');
+    renderInspection(payload);
+
+    if (showStatus) {
+        setStatus('적용 상태를 새로고침했습니다.');
+    }
+
+    return payload;
+}
+
+function populateModelSelect(models, selectedModel) {
+    const select = $('#aws_bedrock_model');
+    select.empty();
+
+    if (!Array.isArray(models) || models.length === 0) {
+        select.append('<option value="">사용 가능한 모델이 없습니다</option>');
+        return;
+    }
+
+    for (const model of models) {
+        const provider = model.bedrock?.provider ? `[${model.bedrock.provider}] ` : '';
+        select.append($('<option>', {
+            value: model.id,
+            text: `${provider}${model.id}`,
+        }));
+    }
+
+    const finalModel = selectedModel || extensionSettings.selectedModel || models[0].id;
+    select.val(finalModel);
+    extensionSettings.selectedModel = String(select.val() || '');
+    saveSettingsDebounced();
+}
+
+function populateFallbackModels(statusMessage = null) {
+    const inferredModel = inferModelFromInferenceProfile(extensionSettings.inferenceProfileId);
+    if (!extensionSettings.selectedModel && inferredModel) {
+        extensionSettings.selectedModel = inferredModel;
+    }
+
+    populateModelSelect(fallbackModels, extensionSettings.selectedModel || inferredModel);
+
+    if (statusMessage) {
+        setStatus(statusMessage);
+    }
+}
+
+async function saveCredentials() {
+    try {
+        saveExtensionSettings();
+        const payload = {
+            enabled: extensionSettings.enabled,
+            region: extensionSettings.region,
+            selectedModel: extensionSettings.selectedModel,
+            inferenceProfileId: extensionSettings.inferenceProfileId,
+            thinkingEffort: extensionSettings.thinkingEffort,
+            serviceTier: extensionSettings.serviceTier,
+        };
+
+        const accessKeyId = String($('#aws_bedrock_access_key_id').val() || '').trim();
+        const secretAccessKey = String($('#aws_bedrock_secret_access_key').val() || '').trim();
+        const sessionToken = String($('#aws_bedrock_session_token').val() || '').trim();
+
+        if (accessKeyId) {
+            payload.accessKeyId = accessKeyId;
+        }
+
+        if (secretAccessKey) {
+            payload.secretAccessKey = secretAccessKey;
+        }
+
+        if (sessionToken) {
+            payload.sessionToken = sessionToken;
+        } else {
+            payload.sessionToken = '';
+            payload.clearSessionToken = true;
+        }
+
+        const config = await fetchPlugin('/config', { method: 'POST', body: payload });
+
+        $('#aws_bedrock_access_key_id').val('');
+        $('#aws_bedrock_secret_access_key').val('');
+        $('#aws_bedrock_session_token').val('');
+        renderCredentialState(config);
+        renderInspection({ config });
+        await refreshInspection(false);
+        const tokenMessage = config.hasSessionToken ? 'Session Token도 함께 저장했습니다.' : 'Session Token은 비워 둔 상태로 저장했습니다.';
+        setStatus(extensionSettings.inferenceProfileId ? `AWS 자격 증명과 Bedrock 옵션을 저장했습니다. ${tokenMessage} inference profile이 실제 호출에 사용됩니다.` : `AWS 자격 증명과 Bedrock 옵션을 저장했습니다. ${tokenMessage}`);
+    } catch (error) {
+        setStatus(`저장 실패: ${error.message}`, true);
+    }
+}
+
+async function clearCredentials() {
+    try {
+        saveExtensionSettings();
+        const config = await fetchPlugin('/config', {
+            method: 'POST',
+            body: {
+                enabled: extensionSettings.enabled,
+                region: extensionSettings.region,
+                selectedModel: extensionSettings.selectedModel,
+                inferenceProfileId: extensionSettings.inferenceProfileId,
+                thinkingEffort: extensionSettings.thinkingEffort,
+                serviceTier: extensionSettings.serviceTier,
+                clearCredentials: true,
+            },
+        });
+
+        $('#aws_bedrock_access_key_id').val('');
+        $('#aws_bedrock_secret_access_key').val('');
+        $('#aws_bedrock_session_token').val('');
+        renderCredentialState(config);
+        renderInspection({ config });
+        await refreshInspection(false);
+        setStatus('저장된 AWS 자격 증명을 삭제했습니다.');
+    } catch (error) {
+        setStatus(`자격 증명 삭제 실패: ${error.message}`, true);
+    }
+}
+
+async function loadModels() {
+    try {
+        await syncPluginConfig();
+        const region = encodeURIComponent(extensionSettings.region || defaultSettings.region);
+        const payload = await fetchPlugin(`/models?region=${region}`);
+        populateModelSelect(payload.data, payload.data?.find(model => model.id === extensionSettings.selectedModel)?.id || extensionSettings.selectedModel);
+        if (payload.fallback) {
+            setStatus(`${payload.data?.length || 0}개 모델을 불러왔습니다. ${payload.message || 'AWS 모델 조회 권한이 없어 내장 목록을 사용했습니다.'}`);
+            return;
+        }
+
+        setStatus(`${payload.data?.length || 0}개 모델을 불러왔습니다.`);
+    } catch (error) {
+        populateFallbackModels(`모델 불러오기에 실패해 내장 목록으로 대체했습니다: ${error.message}`);
+    }
+}
+
+function applyToSillyTavern() {
+    saveExtensionSettings();
+
+    const modelId = extensionSettings.selectedModel || String($('#aws_bedrock_model').val() || '').trim();
+    if (!modelId) {
+        setStatus('먼저 Bedrock 모델을 선택하세요.', true);
+        return;
+    }
+
+    $('#main_api').val('openai').trigger('change');
+    $('#chat_completion_source').val(chat_completion_sources.CUSTOM).trigger('change');
+
+    oai_settings.chat_completion_source = chat_completion_sources.CUSTOM;
+    oai_settings.custom_url = getBridgeUrl();
+    oai_settings.custom_model = modelId;
+
+    $('#custom_api_url_text').val(oai_settings.custom_url).trigger('input');
+    $('#custom_model_id').val(modelId).trigger('input');
+
+    const customSelect = $('#model_custom_select');
+    if (customSelect.length) {
+        if (customSelect.find(`option[value="${modelId.replace(/"/g, '\\"')}"]`).length === 0) {
+            customSelect.append($('<option>', { value: modelId, text: modelId }));
+        }
+        customSelect.val(modelId).trigger('change');
+    }
+
+    saveSettingsDebounced();
+    setStatus(extensionSettings.enabled ? 'OpenAI Custom provider에 Bedrock 브리지를 적용했습니다.' : '연결은 OFF 상태로 저장되었고, ON으로 바꾸기 전까지 실제 호출은 차단됩니다.');
+}
+
+async function applyToSillyTavernAndSync() {
+    try {
+        await syncPluginConfig();
+        applyToSillyTavern();
+    } catch (error) {
+        setStatus(`Bedrock 설정 동기화 실패: ${error.message}`, true);
+    }
+}
+
+async function connectOpenAiCustom() {
+    saveExtensionSettings();
+    if (!extensionSettings.enabled) {
+        setStatus('연결이 OFF 상태입니다. 체크박스를 켜고 저장한 뒤 다시 시도하세요.', true);
+        return;
+    }
+
+    try {
+        await syncPluginConfig();
+        applyToSillyTavern();
+        $('#api_button_openai').trigger('click');
+        setStatus('OpenAI Custom provider 연결 갱신을 요청했습니다.');
+    } catch (error) {
+        setStatus(`연결 동기화 실패: ${error.message}`, true);
+    }
+}
+
+async function verifySettings() {
+    try {
+        await syncPluginConfig();
+
+        const model = extensionSettings.selectedModel || String($('#aws_bedrock_model').val() || '').trim();
+        if (!model) {
+            setStatus('적용 상태 확인 전에 모델을 먼저 선택하세요.', true);
+            return;
+        }
+
+        const payload = await fetchPlugin('/verify', {
+            method: 'POST',
+            body: { model },
+        });
+
+        renderInspection(payload);
+        setStatus('Bedrock 설정 검사를 완료했습니다. 아래 패널에서 적용 결과를 확인하세요.');
+    } catch (error) {
+        setStatus(`적용 상태 확인 실패: ${error.message}`, true);
+    }
+}
+
+function registerEventHandlers() {
+    $(document).off('click', '#aws_bedrock_save').on('click', '#aws_bedrock_save', saveCredentials);
+    $(document).off('click', '#aws_bedrock_clear_credentials').on('click', '#aws_bedrock_clear_credentials', clearCredentials);
+    $(document).off('click', '#aws_bedrock_load_models').on('click', '#aws_bedrock_load_models', loadModels);
+    $(document).off('click', '#aws_bedrock_apply').on('click', '#aws_bedrock_apply', applyToSillyTavernAndSync);
+    $(document).off('click', '#aws_bedrock_connect').on('click', '#aws_bedrock_connect', connectOpenAiCustom);
+    $(document).off('click', '#aws_bedrock_verify').on('click', '#aws_bedrock_verify', verifySettings);
+    $(document).off('click', '#aws_bedrock_refresh_state').on('click', '#aws_bedrock_refresh_state', () => refreshInspection(true));
+    $(document).off('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier').on('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier', saveExtensionSettings);
+}
+
+jQuery(async () => {
+    try {
+        const timestamp = Date.now();
+        const html = await $.get(`${extensionFolderPath}/index.html?v=${timestamp}`);
+
+        $('#extensions_settings2').append(html);
+
+        const cssLink = $('<link>', {
+            rel: 'stylesheet',
+            type: 'text/css',
+            href: `${extensionFolderPath}/style.css?v=${timestamp}`,
+        });
+        $('head').append(cssLink);
+
+        loadSettings();
+        registerEventHandlers();
+        await loadConfig();
+    } catch (error) {
+        console.error('AWS Bedrock Connection extension failed to initialize.', error);
+    }
+});
