@@ -1,0 +1,11 @@
+{
+    "name": "aws-bedrock-bridge",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "main": "index.js",
+    "dependencies": {
+        "@aws-sdk/client-bedrock": "^3.917.0",
+        "@aws-sdk/client-bedrock-runtime": "^3.917.0"
+    }
+}

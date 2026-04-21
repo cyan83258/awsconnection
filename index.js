@@ -3,8 +3,17 @@ import { extension_settings } from '../../../extensions.js';
 import { chat_completion_sources, oai_settings } from '../../../openai.js';
 
 const extensionName = 'aws-connection';
-const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
 const pluginBasePath = '/api/plugins/aws-bedrock-bridge';
+
+function getExtensionFolderPath() {
+    try {
+        return new URL('.', import.meta.url).href.replace(/\/$/, '');
+    } catch {
+        return `scripts/extensions/third-party/${extensionName}`;
+    }
+}
+
+const extensionFolderPath = getExtensionFolderPath();
 
 const defaultSettings = {
     enabled: true,
@@ -104,6 +113,25 @@ function setStatus(message, isError = false) {
     const status = $('#aws_bedrock_status');
     status.text(message);
     status.toggleClass('error', isError);
+}
+
+function setPluginNotice(message, isError = false) {
+    const notice = $('#aws_bedrock_plugin_notice');
+    if (!notice.length) {
+        return;
+    }
+
+    const defaultMessage = '이 저장소에는 서버 플러그인 번들도 포함되어 있습니다. 데스크톱에서는 install-server-plugin.ps1로 설치하고, 모바일 GitHub 설치는 프런트 확장만 자동 설치됩니다.';
+    notice.text(message || defaultMessage);
+    notice.toggleClass('error', isError);
+}
+
+function isPluginUnavailableError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return error?.status === 404
+        || message.includes('cannot get /api/plugins/aws-bedrock-bridge')
+        || message.includes('plugin')
+        || message.includes('not found');
 }
 
 function renderCredentialState(config) {
@@ -262,7 +290,9 @@ async function fetchPlugin(path, options = {}) {
             }
         }
 
-        throw new Error(message);
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
     }
 
     if (response.status === 204) {
@@ -301,9 +331,15 @@ async function loadConfig() {
         $('#aws_bedrock_endpoint').val(getBridgeUrl());
         renderInspection({ config });
         await refreshInspection(false);
+        setPluginNotice();
         setStatus(config.configured ? 'AWS 자격 증명이 저장되어 있습니다.' : 'AWS 자격 증명을 저장하세요.');
     } catch (error) {
         populateFallbackModels('플러그인에 연결하지 못해 내장 모델 목록으로 초기화했습니다.');
+        if (isPluginUnavailableError(error)) {
+            setPluginNotice('서버 플러그인이 아직 설치되지 않았습니다. 이 저장소의 server-plugin/aws-bedrock-bridge 폴더를 SillyTavern/plugins/aws-bedrock-bridge로 복사한 뒤 npm install을 실행하세요. Windows는 install-server-plugin.ps1를 바로 실행하면 됩니다.', true);
+        } else {
+            setPluginNotice();
+        }
         setStatus(`플러그인에 연결할 수 없습니다: ${error.message}`, true);
     }
 }
@@ -536,12 +572,30 @@ function registerEventHandlers() {
     $(document).off('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier').on('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier', saveExtensionSettings);
 }
 
+function getSettingsContainer() {
+    const mobileOrPrimaryContainer = $('#extensions_settings');
+    if (mobileOrPrimaryContainer.length) {
+        return mobileOrPrimaryContainer;
+    }
+
+    const secondaryContainer = $('#extensions_settings2');
+    if (secondaryContainer.length) {
+        return secondaryContainer;
+    }
+
+    return $();
+}
+
 jQuery(async () => {
     try {
         const timestamp = Date.now();
         const html = await $.get(`${extensionFolderPath}/index.html?v=${timestamp}`);
+        const settingsContainer = getSettingsContainer();
+        if (!settingsContainer.length) {
+            throw new Error('확장 설정 컨테이너를 찾지 못했습니다.');
+        }
 
-        $('#extensions_settings2').append(html);
+        settingsContainer.append(html);
 
         const cssLink = $('<link>', {
             rel: 'stylesheet',

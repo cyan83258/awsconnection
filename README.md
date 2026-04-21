@@ -1,5 +1,12 @@
 # AWS Bedrock Connection
 
+이 저장소는 두 부분을 함께 배포합니다.
+
+- 루트: SillyTavern 프런트 확장
+- server-plugin/aws-bedrock-bridge: SillyTavern 서버 플러그인 번들
+
+즉 GitHub에 이 폴더 그대로 올리면, 확장과 서버 플러그인 원본을 같은 저장소에서 같이 배포할 수 있습니다.
+
 이 확장은 SillyTavern 내부 서버 플러그인 `aws-bedrock-bridge`를 이용해 AWS Bedrock 모델을 OpenAI Custom provider로 연결합니다.
 
 ## 기능
@@ -20,6 +27,34 @@
 - SillyTavern 재시작
 - `plugins/aws-bedrock-bridge` 의존성 설치
 
+## 저장소 구조
+
+- `manifest.json`, `index.js`, `index.html`, `style.css`: 프런트 확장 파일
+- `server-plugin/aws-bedrock-bridge`: 서버 플러그인 번들
+- `install-server-plugin.ps1`: Windows 데스크톱에서 서버 플러그인을 SillyTavern에 복사하는 설치 스크립트
+
+## 서버 플러그인 설치
+
+### Windows 데스크톱
+
+1. 이 확장 폴더에서 `install-server-plugin.ps1`를 실행합니다.
+2. 스크립트가 `server-plugin/aws-bedrock-bridge`를 `SillyTavern/plugins/aws-bedrock-bridge`로 복사합니다.
+3. 같은 스크립트가 대상 폴더에서 `npm install`도 실행합니다.
+4. SillyTavern을 재시작합니다.
+
+### 수동 설치
+
+1. `server-plugin/aws-bedrock-bridge` 폴더를 `SillyTavern/plugins/aws-bedrock-bridge`로 복사합니다.
+2. 대상 폴더에서 `npm install`을 실행합니다.
+3. SillyTavern을 재시작합니다.
+
+### 모바일 설치 제한
+
+모바일에서 GitHub URL로 설치하면 프런트 확장만 자동 설치됩니다. 서버 플러그인은 브라우저 확장 코드만으로 `plugins` 폴더에 자동 복사할 수 없으므로, 아래 둘 중 하나가 필요합니다.
+
+1. 데스크톱에서 `install-server-plugin.ps1`를 한 번 실행
+2. 파일 관리자나 쉘로 `server-plugin/aws-bedrock-bridge`를 직접 `plugins/aws-bedrock-bridge`로 복사
+
 ## 사용 순서
 
 1. SillyTavern을 재시작합니다.
@@ -39,3 +74,4 @@
 - `max` effort는 Claude Opus 4.6에서만 전송합니다.
 - adaptive thinking은 soft guidance라서 `medium` 또는 `low`에서는 reasoning이 생략될 수 있습니다.
 - 일부 모델은 on-demand model ID로 직접 호출되지 않으며 inference profile ID 또는 ARN이 필요합니다.
+- 서버 플러그인이 설치되지 않으면 확장 설정 화면에서 안내 문구가 표시됩니다.
