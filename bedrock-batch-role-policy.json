@@ -1,0 +1,31 @@
+﻿{
+    "Version":  "2012-10-17",
+    "Statement":  [
+                      {
+                          "Effect":  "Allow",
+                          "Resource":  [
+                                           "arn:aws:s3:::bedrock-batch-453102798951-us-west-2",
+                                           "arn:aws:s3:::bedrock-batch-453102798951-us-west-2/aws-bedrock-bridge/input/*",
+                                           "arn:aws:s3:::bedrock-batch-453102798951-us-west-2/aws-bedrock-bridge/output/*"
+                                       ],
+                          "Action":  [
+                                         "s3:GetObject",
+                                         "s3:PutObject",
+                                         "s3:AbortMultipartUpload",
+                                         "s3:ListBucket"
+                                     ]
+                      },
+                      {
+                          "Effect":  "Allow",
+                          "Resource":  [
+                                           "arn:aws:bedrock:us-west-2::foundation-model/*",
+                                           "arn:aws:bedrock:us-west-2:453102798951:inference-profile/*",
+                                           "arn:aws:bedrock:us-west-2:453102798951:application-inference-profile/*"
+                                       ],
+                          "Action":  [
+                                         "bedrock:InvokeModel",
+                                         "bedrock:InvokeModelWithResponseStream"
+                                     ]
+                      }
+                  ]
+}

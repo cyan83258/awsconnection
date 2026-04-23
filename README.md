@@ -36,6 +36,7 @@
 - `manifest.json`, `index.js`, `index.html`, `style.css`: 프런트 확장 파일
 - `server-plugin/aws-bedrock-bridge`: 서버 플러그인 번들
 - `install-server-plugin.ps1`: Windows 데스크톱에서 서버 플러그인을 SillyTavern에 복사하는 설치 스크립트
+- `setup-bedrock-batch.ps1`: Windows 데스크톱에서 batch inference용 S3 bucket / IAM role을 자동 생성하고 입력값을 출력하는 스크립트
 - `install-server-plugin-termux.sh`: Termux에서 서버 플러그인 복사, 의존성 설치, CSRF 예외 패치까지 처리하는 스크립트
 - `termux-install.txt`: 모바일에서 한 줄씩 따라 치는 설치 메모
 
@@ -47,6 +48,22 @@
 2. 스크립트가 `server-plugin/aws-bedrock-bridge`를 `SillyTavern/plugins/aws-bedrock-bridge`로 복사합니다.
 3. 같은 스크립트가 대상 폴더에서 `npm install`도 실행합니다.
 4. SillyTavern을 재시작합니다.
+
+### Batch 리소스 자동 생성
+
+AWS CLI가 이미 로그인된 상태라면 이 확장 폴더에서 아래 스크립트를 실행하면 됩니다.
+
+```powershell
+PowerShell -ExecutionPolicy Bypass -File .\setup-bedrock-batch.ps1 -Region us-east-1
+```
+
+스크립트가 자동으로 아래를 처리합니다.
+
+1. batch input/output용 S3 bucket 준비
+2. Bedrock batch service role 생성 또는 재사용
+3. role inline policy 적용
+4. 확장 설정에 넣을 `Batch Input S3 Prefix`, `Batch Output S3 Prefix`, `Batch Service Role ARN` 출력
+5. 현재 플러그인 자격 증명에 붙여야 할 최소 caller policy JSON 파일 생성
 
 ### 수동 설치
 

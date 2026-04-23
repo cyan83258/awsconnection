@@ -1,0 +1,32 @@
+﻿{
+    "Version":  "2012-10-17",
+    "Statement":  [
+                      {
+                          "Effect":  "Allow",
+                          "Resource":  "*",
+                          "Action":  [
+                                         "bedrock:CreateModelInvocationJob",
+                                         "bedrock:GetModelInvocationJob",
+                                         "bedrock:StopModelInvocationJob",
+                                         "bedrock:ListModelInvocationJobs",
+                                         "bedrock:InvokeModel",
+                                         "bedrock:InvokeModelWithResponseStream",
+                                         "bedrock:ListFoundationModels"
+                                     ]
+                      },
+                      {
+                          "Effect":  "Allow",
+                          "Resource":  [
+                                           "arn:aws:s3:::bedrock-batch-453102798951-us-west-2",
+                                           "arn:aws:s3:::bedrock-batch-453102798951-us-west-2/aws-bedrock-bridge/input/*",
+                                           "arn:aws:s3:::bedrock-batch-453102798951-us-west-2/aws-bedrock-bridge/output/*"
+                                       ],
+                          "Action":  [
+                                         "s3:GetObject",
+                                         "s3:PutObject",
+                                         "s3:ListBucket",
+                                         "s3:AbortMultipartUpload"
+                                     ]
+                      }
+                  ]
+}
