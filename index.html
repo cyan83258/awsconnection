@@ -59,7 +59,7 @@
                 <option value="low">low</option>
             </select>
             <div class="aws-bedrock-note aws-bedrock-subnote">
-                문서 기준 adaptive thinking만 지원합니다. Claude 4.6 계열에서만 전송되며, max는 Claude Opus 4.6에서만 지원됩니다.
+                문서 기준 adaptive thinking만 지원합니다. Claude 4.6/4.7 계열에서만 전송되며, max는 Opus 4.6/4.7 또는 Sonnet 4.6에서만 지원됩니다.
             </div>
 
             <label for="aws_bedrock_service_tier">Service Tier</label>
@@ -81,12 +81,14 @@
             <label for="aws_bedrock_cost_saver_max_tokens">Cost Saver 최대 출력 토큰</label>
             <input id="aws_bedrock_cost_saver_max_tokens" class="text_pole" type="number" min="32" step="1" placeholder="예: 512">
 
-            <label class="aws-bedrock-toggle" for="aws_bedrock_caching_enabled">
-                <input id="aws_bedrock_caching_enabled" type="checkbox">
-                <span>Prompt Caching 활성화</span>
-            </label>
+            <label for="aws_bedrock_caching_mode">Prompt Caching</label>
+            <select id="aws_bedrock_caching_mode" class="text_pole">
+                <option value="off">off</option>
+                <option value="5m">5m (기본 ephemeral)</option>
+                <option value="1h">1h (장시간, 쓰기 비용 2배)</option>
+            </select>
             <div class="aws-bedrock-note aws-bedrock-subnote">
-                ON이면 Converse 요청의 재사용 가능한 prefix에 cache checkpoint를 넣어 prompt caching을 시도합니다.
+                5m/1h을 고르면 Converse 요청의 재사용 가능한 prefix에 cache checkpoint를 넣어 prompt caching을 시도합니다. 1h은 5분보다 긴 TTL이 필요할 때만 사용하세요 (1h 쓰기 토큰 단가는 2배).
             </div>
 
             <label class="aws-bedrock-toggle" for="aws_bedrock_batch_enabled">
@@ -108,6 +110,13 @@
 
             <label for="aws_bedrock_batch_kms_key_id">Batch Output KMS Key ID (optional)</label>
             <input id="aws_bedrock_batch_kms_key_id" class="text_pole" type="text" placeholder="예: arn:aws:kms:us-east-1:123456789012:key/...">
+
+            <div class="aws-bedrock-actions">
+                <button id="aws_bedrock_save_batch" class="menu_button">Batch 설정 저장</button>
+            </div>
+            <div class="aws-bedrock-note aws-bedrock-subnote">
+                Batch S3/ARN 값을 서버 설정 파일에 명시적으로 저장합니다. 상단 '저장' 버튼과 동일하게 AWS 자격 증명은 건드리지 않고 Bedrock 옵션만 저장합니다.
+            </div>
 
             <div class="aws-bedrock-actions">
                 <button id="aws_bedrock_apply" class="menu_button">SillyTavern에 적용</button>

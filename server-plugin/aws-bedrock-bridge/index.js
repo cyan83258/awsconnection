@@ -30,13 +30,14 @@ const DEFAULT_CONFIG = {
     serviceTier: 'default',
     costSaverEnabled: false,
     costSaverMaxTokens: 512,
-    cachingEnabled: false,
+    cachingMode: 'off',
     batchEnabled: false,
     batchInputS3Uri: '',
     batchOutputS3Uri: '',
     batchRoleArn: '',
     batchKmsKeyId: '',
 };
+const CACHING_MODES = new Set(['off', '5m', '1h']);
 const SECRET_KEYS = {
     accessKeyId: 'aws_bedrock_access_key_id',
     secretAccessKey: 'aws_bedrock_secret_access_key',
@@ -116,6 +117,18 @@ function normalizeServiceTier(value) {
     return SERVICE_TIER_TYPES.has(candidate) ? candidate : DEFAULT_CONFIG.serviceTier;
 }
 
+function normalizeCachingMode(value, legacyEnabled) {
+    const candidate = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (CACHING_MODES.has(candidate)) {
+        return candidate;
+    }
+    // Backward compatibility with old cachingEnabled boolean.
+    if (legacyEnabled === true || /^(true|1|on|yes)$/i.test(String(legacyEnabled))) {
+        return '5m';
+    }
+    return DEFAULT_CONFIG.cachingMode;
+}
+
 function normalizeS3Uri(value) {
     const candidate = typeof value === 'string' ? value.trim() : '';
     if (!candidate) {
@@ -152,7 +165,7 @@ function normalizeConfig(config = {}) {
         serviceTier: normalizeServiceTier(config.serviceTier),
         costSaverEnabled: normalizeBoolean(config.costSaverEnabled, DEFAULT_CONFIG.costSaverEnabled),
         costSaverMaxTokens: normalizePositiveInteger(config.costSaverMaxTokens, DEFAULT_COST_SAVER_MAX_TOKENS, 32),
-        cachingEnabled: normalizeBoolean(config.cachingEnabled, DEFAULT_CONFIG.cachingEnabled),
+        cachingMode: normalizeCachingMode(config.cachingMode, config.cachingEnabled),
         batchEnabled: normalizeBoolean(config.batchEnabled, DEFAULT_CONFIG.batchEnabled),
         batchInputS3Uri: normalizeS3Uri(config.batchInputS3Uri),
         batchOutputS3Uri: normalizeS3Uri(config.batchOutputS3Uri),
@@ -458,11 +471,13 @@ function hasReasoningContent(content) {
 }
 
 function modelSupportsAdaptiveThinking(modelId) {
-    return /claude-(opus|sonnet)-4-6/i.test(modelId || '');
+    // Anthropic adaptive thinking: Opus 4.6/4.7, Sonnet 4.6, Mythos Preview.
+    return /claude-(opus|sonnet)-4-[67]/i.test(modelId || '') || /claude-mythos/i.test(modelId || '');
 }
 
 function modelSupportsMaxThinking(modelId) {
-    return /claude-opus-4-6/i.test(modelId || '');
+    // Per Anthropic docs, max effort is supported on Opus 4.6/4.7, Sonnet 4.6, and Mythos Preview.
+    return /claude-(opus|sonnet)-4-6/i.test(modelId || '') || /claude-opus-4-7/i.test(modelId || '');
 }
 
 function buildOptionState(config, modelId) {
@@ -479,7 +494,7 @@ function buildOptionState(config, modelId) {
     } else if (!modelSupportsAdaptiveThinking(modelId)) {
         thinking.reason = '선택한 모델은 Claude 4.6 adaptive thinking 지원 모델이 아니라서 thinking을 전송하지 않았습니다.';
     } else if (config.thinkingEffort === 'max' && !modelSupportsMaxThinking(modelId)) {
-        thinking.reason = 'max thinking은 Claude Opus 4.6에서만 지원되어 전송하지 않았습니다.';
+        thinking.reason = 'max thinking은 Claude Opus 4.6/4.7 또는 Sonnet 4.6에서만 지원되어 전송하지 않았습니다.';
     } else {
         thinking.sent = true;
         thinking.type = 'adaptive';
@@ -503,10 +518,12 @@ function buildOptionState(config, modelId) {
             disabledThinking: false,
         },
         caching: {
-            requested: config.cachingEnabled === true,
+            requested: config.cachingMode && config.cachingMode !== 'off',
+            mode: config.cachingMode || 'off',
+            ttl: config.cachingMode === '1h' ? '1h' : '5m',
             sent: false,
             checkpointCount: 0,
-            reason: config.cachingEnabled === true ? null : 'Prompt caching이 OFF 상태입니다.',
+            reason: (config.cachingMode && config.cachingMode !== 'off') ? null : 'Prompt caching이 OFF 상태입니다.',
         },
         batch: {
             requested: config.batchEnabled === true,
@@ -569,15 +586,15 @@ function buildFallbackModelList(config, region, reason) {
     };
 }
 
-function createCachePoint() {
-    return {
-        cachePoint: {
-            type: 'default',
-        },
-    };
+function createCachePoint(ttl) {
+    const cachePoint = { type: 'default' };
+    if (ttl === '1h') {
+        cachePoint.ttl = '1h';
+    }
+    return { cachePoint };
 }
 
-function appendCachePoint(blocks) {
+function appendCachePoint(blocks, ttl) {
     if (!Array.isArray(blocks) || blocks.length === 0) {
         return false;
     }
@@ -587,7 +604,7 @@ function appendCachePoint(blocks) {
         return false;
     }
 
-    blocks.push(createCachePoint());
+    blocks.push(createCachePoint(ttl));
     return true;
 }
 
@@ -596,15 +613,16 @@ function applyPromptCaching(input, optionState) {
         return;
     }
 
+    const ttl = optionState.caching.ttl || '5m';
     let checkpointCount = 0;
 
-    if (appendCachePoint(input.system)) {
+    if (appendCachePoint(input.system, ttl)) {
         checkpointCount += 1;
     }
 
     if (Array.isArray(input.messages) && input.messages.length > 1) {
         const prefixMessage = input.messages[input.messages.length - 2];
-        if (appendCachePoint(prefixMessage?.content)) {
+        if (appendCachePoint(prefixMessage?.content, ttl)) {
             checkpointCount += 1;
         }
     }
@@ -968,10 +986,16 @@ function buildConverseInput(body, config) {
     }
 
     if (optionState.thinking.sent) {
+        // Per Anthropic docs: thinking has only {type}. Effort goes in output_config.
         additionalModelRequestFields.thinking = {
             type: optionState.thinking.type,
-            effort: optionState.thinking.effort,
         };
+        if (optionState.thinking.effort) {
+            additionalModelRequestFields.output_config = {
+                ...(additionalModelRequestFields.output_config || {}),
+                effort: optionState.thinking.effort,
+            };
+        }
     }
 
     if (Object.keys(additionalModelRequestFields).length > 0) {
@@ -1033,7 +1057,8 @@ function buildInvocationSummary({ source, region, requestedModelId, invocationMo
             serviceTier: config.serviceTier,
             costSaverEnabled: config.costSaverEnabled,
             costSaverMaxTokens: config.costSaverMaxTokens,
-            cachingEnabled: config.cachingEnabled,
+            cachingMode: config.cachingMode,
+            cachingEnabled: config.cachingMode && config.cachingMode !== 'off',
             batchEnabled: config.batchEnabled,
         },
         applied: optionState,
@@ -1100,7 +1125,9 @@ function isStreamingFallbackCandidate(error) {
 
 function isAdaptiveEffortFallbackCandidate(error) {
     const message = String(error?.message || '');
-    return /thinking(?:\.adaptive)?\.effort:\s*Extra inputs are not permitted/i.test(message);
+    return /thinking(?:\.adaptive)?\.effort:\s*Extra inputs are not permitted/i.test(message)
+        || /output_config(?:\.effort)?:\s*Extra inputs are not permitted/i.test(message)
+        || /\beffort\b:\s*Extra inputs are not permitted/i.test(message);
 }
 
 function buildAdaptiveThinkingFallbackInput(input) {
@@ -1113,6 +1140,11 @@ function buildAdaptiveThinkingFallbackInput(input) {
         fallback.additionalModelRequestFields.thinking = {
             type: 'adaptive',
         };
+    }
+
+    if (fallback.additionalModelRequestFields?.output_config) {
+        // Strip output_config entirely if the runtime rejects effort there too.
+        delete fallback.additionalModelRequestFields.output_config;
     }
 
     return fallback;
@@ -1420,7 +1452,8 @@ function buildConfigResponse(directories) {
         serviceTier: config.serviceTier,
         costSaverEnabled: config.costSaverEnabled,
         costSaverMaxTokens: config.costSaverMaxTokens,
-        cachingEnabled: config.cachingEnabled,
+        cachingMode: config.cachingMode,
+        cachingEnabled: config.cachingMode && config.cachingMode !== 'off',
         batchEnabled: config.batchEnabled,
         batchInputS3Uri: config.batchInputS3Uri,
         batchOutputS3Uri: config.batchOutputS3Uri,
@@ -1503,6 +1536,7 @@ export async function init(router) {
             serviceTier: body.serviceTier,
             costSaverEnabled: body.costSaverEnabled,
             costSaverMaxTokens: body.costSaverMaxTokens,
+            cachingMode: body.cachingMode,
             cachingEnabled: body.cachingEnabled,
             batchEnabled: body.batchEnabled,
             batchInputS3Uri: typeof body.batchInputS3Uri === 'string' ? body.batchInputS3Uri.trim() : currentConfig.batchInputS3Uri,

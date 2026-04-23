@@ -24,7 +24,7 @@ const defaultSettings = {
     serviceTier: 'default',
     costSaverEnabled: false,
     costSaverMaxTokens: 512,
-    cachingEnabled: false,
+    cachingMode: 'off',
     batchEnabled: false,
     batchInputS3Uri: '',
     batchOutputS3Uri: '',
@@ -65,6 +65,11 @@ function loadSettings() {
         }
     }
 
+    // Backward compat: migrate old cachingEnabled boolean to cachingMode.
+    if (Object.prototype.hasOwnProperty.call(extensionSettings, 'cachingEnabled') && !['5m', '1h'].includes(extensionSettings.cachingMode)) {
+        extensionSettings.cachingMode = extensionSettings.cachingEnabled ? '5m' : 'off';
+    }
+
     $('#aws_bedrock_enabled').prop('checked', extensionSettings.enabled !== false);
     $('#aws_bedrock_region').val(extensionSettings.region || defaultSettings.region);
     $('#aws_bedrock_inference_profile_id').val(extensionSettings.inferenceProfileId || defaultSettings.inferenceProfileId);
@@ -72,7 +77,7 @@ function loadSettings() {
     $('#aws_bedrock_service_tier').val(extensionSettings.serviceTier || defaultSettings.serviceTier);
     $('#aws_bedrock_cost_saver_enabled').prop('checked', extensionSettings.costSaverEnabled === true);
     $('#aws_bedrock_cost_saver_max_tokens').val(extensionSettings.costSaverMaxTokens || defaultSettings.costSaverMaxTokens);
-    $('#aws_bedrock_caching_enabled').prop('checked', extensionSettings.cachingEnabled === true);
+    $('#aws_bedrock_caching_mode').val(extensionSettings.cachingMode || defaultSettings.cachingMode);
     $('#aws_bedrock_batch_enabled').prop('checked', extensionSettings.batchEnabled === true);
     $('#aws_bedrock_batch_input_s3_uri').val(extensionSettings.batchInputS3Uri || defaultSettings.batchInputS3Uri);
     $('#aws_bedrock_batch_output_s3_uri').val(extensionSettings.batchOutputS3Uri || defaultSettings.batchOutputS3Uri);
@@ -90,7 +95,10 @@ function saveExtensionSettings() {
     extensionSettings.serviceTier = String($('#aws_bedrock_service_tier').val() || defaultSettings.serviceTier).trim() || defaultSettings.serviceTier;
     extensionSettings.costSaverEnabled = $('#aws_bedrock_cost_saver_enabled').is(':checked');
     extensionSettings.costSaverMaxTokens = Math.max(32, Number.parseInt(String($('#aws_bedrock_cost_saver_max_tokens').val() || defaultSettings.costSaverMaxTokens), 10) || defaultSettings.costSaverMaxTokens);
-    extensionSettings.cachingEnabled = $('#aws_bedrock_caching_enabled').is(':checked');
+    {
+        const mode = String($('#aws_bedrock_caching_mode').val() || '').trim().toLowerCase();
+        extensionSettings.cachingMode = ['off', '5m', '1h'].includes(mode) ? mode : defaultSettings.cachingMode;
+    }
     extensionSettings.batchEnabled = $('#aws_bedrock_batch_enabled').is(':checked');
     extensionSettings.batchInputS3Uri = String($('#aws_bedrock_batch_input_s3_uri').val() || '').trim();
     extensionSettings.batchOutputS3Uri = String($('#aws_bedrock_batch_output_s3_uri').val() || '').trim();
@@ -130,7 +138,7 @@ async function syncPluginConfig() {
             serviceTier: extensionSettings.serviceTier,
             costSaverEnabled: extensionSettings.costSaverEnabled,
             costSaverMaxTokens: extensionSettings.costSaverMaxTokens,
-            cachingEnabled: extensionSettings.cachingEnabled,
+            cachingMode: extensionSettings.cachingMode,
             batchEnabled: extensionSettings.batchEnabled,
             batchInputS3Uri: extensionSettings.batchInputS3Uri,
             batchOutputS3Uri: extensionSettings.batchOutputS3Uri,
@@ -235,7 +243,10 @@ function renderInspection(payload) {
     $('#aws_bedrock_inspect_thinking').text(config.thinkingEffort || defaultSettings.thinkingEffort);
     $('#aws_bedrock_inspect_service_tier').text(config.serviceTier || defaultSettings.serviceTier);
     $('#aws_bedrock_inspect_cost_saver').text(config.costSaverEnabled ? `ON (${config.costSaverMaxTokens || defaultSettings.costSaverMaxTokens})` : 'OFF');
-    $('#aws_bedrock_inspect_caching').text(config.cachingEnabled ? 'ON' : 'OFF');
+    {
+        const serverCachingMode = typeof config.cachingMode === 'string' && ['off', '5m', '1h'].includes(config.cachingMode) ? config.cachingMode : (config.cachingEnabled ? '5m' : 'off');
+        $('#aws_bedrock_inspect_caching').text(serverCachingMode === 'off' ? 'OFF' : `ON (${serverCachingMode})`);
+    }
     $('#aws_bedrock_inspect_batch').text(config.batchEnabled ? 'ON' : 'OFF');
     $('#aws_bedrock_inspect_time').text(formatDateTime(lastInvocation?.requestedAt));
     $('#aws_bedrock_inspect_model').text(lastInvocation?.modelId || config.selectedModel || '-');
@@ -248,7 +259,7 @@ function renderInspection(payload) {
 
     $('#aws_bedrock_inspect_service_tier_applied').text(appliedServiceTier ? `요청 ${requestedServiceTier} / 응답 ${appliedServiceTier}` : `요청 ${requestedServiceTier} / 응답 미확인`);
     $('#aws_bedrock_inspect_cost_saver_applied').text(appliedCostSaver?.sent ? `max ${appliedCostSaver.maxTokens || config.costSaverMaxTokens || defaultSettings.costSaverMaxTokens}` : (appliedCostSaver?.reason || 'OFF'));
-    $('#aws_bedrock_inspect_caching_applied').text(lastInvocation?.applied?.caching?.sent ? `checkpoint ${lastInvocation.applied.caching.checkpointCount || 0}개` : (lastInvocation?.applied?.caching?.reason || '전송 기록 없음'));
+    $('#aws_bedrock_inspect_caching_applied').text(lastInvocation?.applied?.caching?.sent ? `checkpoint ${lastInvocation.applied.caching.checkpointCount || 0}개 (${lastInvocation.applied.caching.ttl || '5m'})` : (lastInvocation?.applied?.caching?.reason || '전송 기록 없음'));
     $('#aws_bedrock_inspect_batch_applied').text(lastInvocation?.applied?.batch?.sent ? (lastInvocation.applied.batch.jobArn || 'job 제출됨') : (lastInvocation?.applied?.batch?.reason || 'OFF'));
     $('#aws_bedrock_inspect_usage').text(usage ? `in ${usage.prompt_tokens || 0} / out ${usage.completion_tokens || 0}` : '-');
     $('#aws_bedrock_inspect_cost_estimate').text(costEstimate?.display || '가격표 미설정 또는 사용량 없음');
@@ -425,7 +436,16 @@ async function loadConfig() {
         extensionSettings.serviceTier = config.serviceTier || extensionSettings.serviceTier || defaultSettings.serviceTier;
         extensionSettings.costSaverEnabled = config.costSaverEnabled === true;
         extensionSettings.costSaverMaxTokens = Number(config.costSaverMaxTokens) || extensionSettings.costSaverMaxTokens || defaultSettings.costSaverMaxTokens;
-        extensionSettings.cachingEnabled = config.cachingEnabled === true;
+        {
+            const serverMode = typeof config.cachingMode === 'string' ? config.cachingMode.trim().toLowerCase() : '';
+            if (['off', '5m', '1h'].includes(serverMode)) {
+                extensionSettings.cachingMode = serverMode;
+            } else if (typeof config.cachingEnabled === 'boolean') {
+                extensionSettings.cachingMode = config.cachingEnabled ? '5m' : 'off';
+            } else if (!extensionSettings.cachingMode) {
+                extensionSettings.cachingMode = defaultSettings.cachingMode;
+            }
+        }
         extensionSettings.batchEnabled = config.batchEnabled === true;
         extensionSettings.batchInputS3Uri = config.batchInputS3Uri || extensionSettings.batchInputS3Uri || defaultSettings.batchInputS3Uri;
         extensionSettings.batchOutputS3Uri = config.batchOutputS3Uri || extensionSettings.batchOutputS3Uri || defaultSettings.batchOutputS3Uri;
@@ -438,7 +458,7 @@ async function loadConfig() {
         $('#aws_bedrock_service_tier').val(extensionSettings.serviceTier);
         $('#aws_bedrock_cost_saver_enabled').prop('checked', extensionSettings.costSaverEnabled);
         $('#aws_bedrock_cost_saver_max_tokens').val(extensionSettings.costSaverMaxTokens);
-        $('#aws_bedrock_caching_enabled').prop('checked', extensionSettings.cachingEnabled);
+        $('#aws_bedrock_caching_mode').val(extensionSettings.cachingMode);
         $('#aws_bedrock_batch_enabled').prop('checked', extensionSettings.batchEnabled);
         $('#aws_bedrock_batch_input_s3_uri').val(extensionSettings.batchInputS3Uri);
         $('#aws_bedrock_batch_output_s3_uri').val(extensionSettings.batchOutputS3Uri);
@@ -522,7 +542,7 @@ async function saveCredentials() {
             serviceTier: extensionSettings.serviceTier,
             costSaverEnabled: extensionSettings.costSaverEnabled,
             costSaverMaxTokens: extensionSettings.costSaverMaxTokens,
-            cachingEnabled: extensionSettings.cachingEnabled,
+            cachingMode: extensionSettings.cachingMode,
             batchEnabled: extensionSettings.batchEnabled,
             batchInputS3Uri: extensionSettings.batchInputS3Uri,
             batchOutputS3Uri: extensionSettings.batchOutputS3Uri,
@@ -580,7 +600,7 @@ async function clearCredentials() {
                 serviceTier: extensionSettings.serviceTier,
                 costSaverEnabled: extensionSettings.costSaverEnabled,
                 costSaverMaxTokens: extensionSettings.costSaverMaxTokens,
-                cachingEnabled: extensionSettings.cachingEnabled,
+                cachingMode: extensionSettings.cachingMode,
                 batchEnabled: extensionSettings.batchEnabled,
                 batchInputS3Uri: extensionSettings.batchInputS3Uri,
                 batchOutputS3Uri: extensionSettings.batchOutputS3Uri,
@@ -659,8 +679,41 @@ async function applyToSillyTavernAndSync() {
     try {
         await syncPluginConfig();
         applyToSillyTavern();
+        // Refresh the inspection panel so saved/applied states reflect the sync
+        // immediately instead of waiting for the 15s poll.
+        await refreshInspection(false);
     } catch (error) {
         setStatus(`Bedrock 설정 동기화 실패: ${error.message}`, true);
+    }
+}
+
+async function saveBatchSettings() {
+    try {
+        saveExtensionSettings();
+        const config = await fetchPlugin('/config', {
+            method: 'POST',
+            body: {
+                enabled: extensionSettings.enabled,
+                region: extensionSettings.region,
+                selectedModel: extensionSettings.selectedModel,
+                inferenceProfileId: extensionSettings.inferenceProfileId,
+                thinkingEffort: extensionSettings.thinkingEffort,
+                serviceTier: extensionSettings.serviceTier,
+                costSaverEnabled: extensionSettings.costSaverEnabled,
+                costSaverMaxTokens: extensionSettings.costSaverMaxTokens,
+                cachingMode: extensionSettings.cachingMode,
+                batchEnabled: extensionSettings.batchEnabled,
+                batchInputS3Uri: extensionSettings.batchInputS3Uri,
+                batchOutputS3Uri: extensionSettings.batchOutputS3Uri,
+                batchRoleArn: extensionSettings.batchRoleArn,
+                batchKmsKeyId: extensionSettings.batchKmsKeyId,
+            },
+        });
+        renderInspection({ config });
+        await refreshInspection(false);
+        setStatus(`Batch 설정을 저장했습니다. input=${extensionSettings.batchInputS3Uri || '(비어있음)'}, output=${extensionSettings.batchOutputS3Uri || '(비어있음)'}, role=${extensionSettings.batchRoleArn || '(비어있음)'}`);
+    } catch (error) {
+        setStatus(`Batch 설정 저장 실패: ${error.message}`, true);
     }
 }
 
@@ -711,7 +764,8 @@ function registerEventHandlers() {
     $(document).off('click', '#aws_bedrock_connect').on('click', '#aws_bedrock_connect', connectOpenAiCustom);
     $(document).off('click', '#aws_bedrock_verify').on('click', '#aws_bedrock_verify', verifySettings);
     $(document).off('click', '#aws_bedrock_refresh_state').on('click', '#aws_bedrock_refresh_state', () => refreshInspection(true));
-    $(document).off('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier, #aws_bedrock_cost_saver_enabled, #aws_bedrock_cost_saver_max_tokens, #aws_bedrock_caching_enabled, #aws_bedrock_batch_enabled, #aws_bedrock_batch_input_s3_uri, #aws_bedrock_batch_output_s3_uri, #aws_bedrock_batch_role_arn, #aws_bedrock_batch_kms_key_id').on('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier, #aws_bedrock_cost_saver_enabled, #aws_bedrock_cost_saver_max_tokens, #aws_bedrock_caching_enabled, #aws_bedrock_batch_enabled, #aws_bedrock_batch_input_s3_uri, #aws_bedrock_batch_output_s3_uri, #aws_bedrock_batch_role_arn, #aws_bedrock_batch_kms_key_id', saveExtensionSettings);
+    $(document).off('click', '#aws_bedrock_save_batch').on('click', '#aws_bedrock_save_batch', saveBatchSettings);
+    $(document).off('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier, #aws_bedrock_cost_saver_enabled, #aws_bedrock_cost_saver_max_tokens, #aws_bedrock_caching_mode, #aws_bedrock_batch_enabled, #aws_bedrock_batch_input_s3_uri, #aws_bedrock_batch_output_s3_uri, #aws_bedrock_batch_role_arn, #aws_bedrock_batch_kms_key_id').on('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier, #aws_bedrock_cost_saver_enabled, #aws_bedrock_cost_saver_max_tokens, #aws_bedrock_caching_mode, #aws_bedrock_batch_enabled, #aws_bedrock_batch_input_s3_uri, #aws_bedrock_batch_output_s3_uri, #aws_bedrock_batch_role_arn, #aws_bedrock_batch_kms_key_id', saveExtensionSettings);
 }
 
 function getSettingsContainer() {
