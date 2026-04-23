@@ -18,6 +18,10 @@
 - Bedrock 연결 ON/OFF
 - Claude 4.6 adaptive thinking effort 설정 (`max`, `high`, `medium`, `low`)
 - Bedrock service tier 설정 (`reserved`, `priority`, `default`, `flex`)
+- Cost Saver ON/OFF와 최대 출력 토큰 cap
+- Prompt caching ON/OFF와 cache checkpoint 자동 삽입
+- Batch inference ON/OFF와 Bedrock batch job 제출/완료 대기
+- 최근 응답의 usage 토큰과 대략적인 USD 비용 추정 표시
 - 마지막 검증 요청에서 thinking 흔적과 resolved service tier 확인
 - 외부 Docker, 별도 프록시 프로그램 없이 SillyTavern 내부에서 사용
 
@@ -65,17 +69,23 @@
 2. 확장 설정에서 AWS Bedrock 자격 증명과 Region을 저장합니다.
 3. 모델 목록을 불러옵니다.
 4. 원하는 모델을 선택합니다.
-5. 필요하면 연결 활성화, adaptive thinking effort, service tier를 설정합니다.
+5. 필요하면 연결 활성화, adaptive thinking effort, service tier, Cost Saver, prompt caching을 설정합니다.
 6. Claude Opus 4.6처럼 on-demand 호출이 막힌 모델이면 inference profile ID/ARN도 입력합니다.
-7. `저장` 버튼으로 반영합니다.
-8. `SillyTavern에 적용` 버튼을 누릅니다.
-9. 필요하면 `연결 확인` 버튼으로 Custom provider 상태를 갱신합니다.
-10. `적용 상태 확인`을 누르면 마지막 Bedrock 검증 요청의 reasoning 흔적, 응답 service tier, 실제 호출 대상을 볼 수 있습니다.
+7. batch inference를 쓸 경우 `Batch Input S3 Prefix`, `Batch Output S3 Prefix`, `Batch Service Role ARN`을 입력하고 Batch를 ON으로 둡니다.
+8. `저장` 버튼으로 반영합니다.
+9. `SillyTavern에 적용` 버튼을 누릅니다.
+10. 필요하면 `연결 확인` 버튼으로 Custom provider 상태를 갱신합니다.
+11. `적용 상태 확인`을 누르면 마지막 Bedrock 검증 요청의 reasoning 흔적, 응답 service tier, cost saver/caching/batch 적용 여부, usage 토큰, 예상 비용, 실제 호출 대상을 볼 수 있습니다.
 
 ## 참고
 
 - adaptive thinking은 현재 AWS 문서 기준으로 Claude Opus 4.6 / Claude Sonnet 4.6에서만 전송합니다.
 - `max` effort는 Claude Opus 4.6에서만 전송합니다.
 - adaptive thinking은 soft guidance라서 `medium` 또는 `low`에서는 reasoning이 생략될 수 있습니다.
+- Cost Saver는 thinking을 끄고 출력 토큰을 상한으로 제한해서 응답당 비용을 더 줄입니다.
+- prompt caching은 재사용 가능한 system/prefix 구간에 cache checkpoint를 넣는 방식으로 동작합니다.
+- batch inference는 실시간 스트리밍 대신 S3 기반 비동기 job을 생성한 뒤 완료될 때까지 서버 플러그인이 기다립니다.
+- batch inference를 쓰려면 Bedrock batch job 권한과 S3 접근 권한이 있는 IAM service role ARN이 필요합니다.
+- 비용 표시는 Anthropic 계열 모델의 대략적인 토큰 단가와 실제 usage 기준으로 계산하며, caching 세부 할인은 AWS usage에 별도 토큰이 없어서 표준 입력 단가 기준 추정입니다.
 - 일부 모델은 on-demand model ID로 직접 호출되지 않으며 inference profile ID 또는 ARN이 필요합니다.
 - 서버 플러그인이 설치되지 않으면 확장 설정 화면에서 안내 문구가 표시됩니다.

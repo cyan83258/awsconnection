@@ -2,8 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Buffer } from 'node:buffer';
 
-import { BedrockClient, ListFoundationModelsCommand } from '@aws-sdk/client-bedrock';
+import {
+    BedrockClient,
+    CreateModelInvocationJobCommand,
+    GetModelInvocationJobCommand,
+    ListFoundationModelsCommand,
+} from '@aws-sdk/client-bedrock';
 import { BedrockRuntimeClient, ConverseCommand, ConverseStreamCommand } from '@aws-sdk/client-bedrock-runtime';
+import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 
 import { SecretManager } from '../../src/endpoints/secrets.js';
 
@@ -22,6 +28,14 @@ const DEFAULT_CONFIG = {
     inferenceProfileId: '',
     thinkingEffort: 'high',
     serviceTier: 'default',
+    costSaverEnabled: false,
+    costSaverMaxTokens: 512,
+    cachingEnabled: false,
+    batchEnabled: false,
+    batchInputS3Uri: '',
+    batchOutputS3Uri: '',
+    batchRoleArn: '',
+    batchKmsKeyId: '',
 };
 const SECRET_KEYS = {
     accessKeyId: 'aws_bedrock_access_key_id',
@@ -31,6 +45,35 @@ const SECRET_KEYS = {
 const THINKING_EFFORTS = new Set(['max', 'high', 'medium', 'low']);
 const SERVICE_TIER_TYPES = new Set(['reserved', 'priority', 'default', 'flex']);
 const lastInvocationState = new Map();
+const BATCH_POLL_INTERVAL_MS = 10000;
+const BATCH_MAX_WAIT_MS = 30 * 60 * 1000;
+const DEFAULT_COST_SAVER_MAX_TOKENS = 512;
+const MODEL_PRICING = [
+    {
+        pattern: /claude-3-5-haiku/i,
+        inputPerMillionUsd: 0.8,
+        outputPerMillionUsd: 4,
+        label: 'Claude 3.5 Haiku',
+    },
+    {
+        pattern: /claude-(3-5|3-7)-sonnet/i,
+        inputPerMillionUsd: 3,
+        outputPerMillionUsd: 15,
+        label: 'Claude Sonnet',
+    },
+    {
+        pattern: /claude-sonnet-4(?:-6)?/i,
+        inputPerMillionUsd: 3,
+        outputPerMillionUsd: 15,
+        label: 'Claude Sonnet 4',
+    },
+    {
+        pattern: /claude-opus-4(?:-6)?/i,
+        inputPerMillionUsd: 15,
+        outputPerMillionUsd: 75,
+        label: 'Claude Opus 4',
+    },
+];
 const FALLBACK_MODEL_IDS = [
     'anthropic.claude-3-5-haiku-20241022-v1:0',
     'anthropic.claude-3-5-sonnet-20241022-v2:0',
@@ -73,6 +116,32 @@ function normalizeServiceTier(value) {
     return SERVICE_TIER_TYPES.has(candidate) ? candidate : DEFAULT_CONFIG.serviceTier;
 }
 
+function normalizeS3Uri(value) {
+    const candidate = typeof value === 'string' ? value.trim() : '';
+    if (!candidate) {
+        return '';
+    }
+
+    if (!/^s3:\/\//i.test(candidate)) {
+        return '';
+    }
+
+    return candidate.endsWith('/') ? candidate : `${candidate}/`;
+}
+
+function normalizeArn(value) {
+    return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizePositiveInteger(value, fallback, minimum = 1) {
+    const parsed = Number.parseInt(String(value ?? ''), 10);
+    if (Number.isFinite(parsed) && parsed >= minimum) {
+        return parsed;
+    }
+
+    return fallback;
+}
+
 function normalizeConfig(config = {}) {
     return {
         enabled: normalizeBoolean(config.enabled, DEFAULT_CONFIG.enabled),
@@ -81,6 +150,14 @@ function normalizeConfig(config = {}) {
         inferenceProfileId: typeof config.inferenceProfileId === 'string' ? config.inferenceProfileId.trim() : DEFAULT_CONFIG.inferenceProfileId,
         thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
         serviceTier: normalizeServiceTier(config.serviceTier),
+        costSaverEnabled: normalizeBoolean(config.costSaverEnabled, DEFAULT_CONFIG.costSaverEnabled),
+        costSaverMaxTokens: normalizePositiveInteger(config.costSaverMaxTokens, DEFAULT_COST_SAVER_MAX_TOKENS, 32),
+        cachingEnabled: normalizeBoolean(config.cachingEnabled, DEFAULT_CONFIG.cachingEnabled),
+        batchEnabled: normalizeBoolean(config.batchEnabled, DEFAULT_CONFIG.batchEnabled),
+        batchInputS3Uri: normalizeS3Uri(config.batchInputS3Uri),
+        batchOutputS3Uri: normalizeS3Uri(config.batchOutputS3Uri),
+        batchRoleArn: normalizeArn(config.batchRoleArn),
+        batchKmsKeyId: normalizeArn(config.batchKmsKeyId),
     };
 }
 
@@ -175,6 +252,7 @@ function createBedrockClients(directories, region) {
     return {
         bedrock: new BedrockClient(clientConfig),
         runtime: new BedrockRuntimeClient(clientConfig),
+        s3: new S3Client(clientConfig),
     };
 }
 
@@ -417,6 +495,26 @@ function buildOptionState(config, modelId) {
             type: config.serviceTier,
             reason: null,
         },
+        costSaver: {
+            requested: config.costSaverEnabled === true,
+            sent: false,
+            maxTokens: null,
+            reason: config.costSaverEnabled === true ? null : 'Cost Saver 모드가 OFF 상태입니다.',
+            disabledThinking: false,
+        },
+        caching: {
+            requested: config.cachingEnabled === true,
+            sent: false,
+            checkpointCount: 0,
+            reason: config.cachingEnabled === true ? null : 'Prompt caching이 OFF 상태입니다.',
+        },
+        batch: {
+            requested: config.batchEnabled === true,
+            sent: false,
+            jobArn: null,
+            status: null,
+            reason: config.batchEnabled === true ? null : 'Batch inference가 OFF 상태입니다.',
+        },
         requestAdjustments: [],
     };
 }
@@ -471,14 +569,371 @@ function buildFallbackModelList(config, region, reason) {
     };
 }
 
+function createCachePoint() {
+    return {
+        cachePoint: {
+            type: 'default',
+        },
+    };
+}
+
+function appendCachePoint(blocks) {
+    if (!Array.isArray(blocks) || blocks.length === 0) {
+        return false;
+    }
+
+    const lastBlock = blocks[blocks.length - 1];
+    if (lastBlock?.cachePoint?.type === 'default') {
+        return false;
+    }
+
+    blocks.push(createCachePoint());
+    return true;
+}
+
+function applyPromptCaching(input, optionState) {
+    if (!optionState?.caching?.requested) {
+        return;
+    }
+
+    let checkpointCount = 0;
+
+    if (appendCachePoint(input.system)) {
+        checkpointCount += 1;
+    }
+
+    if (Array.isArray(input.messages) && input.messages.length > 1) {
+        const prefixMessage = input.messages[input.messages.length - 2];
+        if (appendCachePoint(prefixMessage?.content)) {
+            checkpointCount += 1;
+        }
+    }
+
+    if (checkpointCount > 0) {
+        optionState.caching.sent = true;
+        optionState.caching.checkpointCount = checkpointCount;
+        optionState.caching.reason = null;
+        return;
+    }
+
+    optionState.caching.reason = 'cache checkpoint를 넣을 재사용 가능한 prefix를 찾지 못했습니다.';
+}
+
+function resolveMaxTokens(body) {
+    const maxTokens = Number(body?.max_tokens);
+    if (Number.isFinite(maxTokens) && maxTokens > 0) {
+        return Math.floor(maxTokens);
+    }
+
+    const maxCompletionTokens = Number(body?.max_completion_tokens);
+    if (Number.isFinite(maxCompletionTokens) && maxCompletionTokens > 0) {
+        return Math.floor(maxCompletionTokens);
+    }
+
+    return null;
+}
+
+function applyCostSaver(inferenceConfig, optionState, config) {
+    if (!optionState?.costSaver?.requested) {
+        return;
+    }
+
+    const maxTokens = normalizePositiveInteger(config.costSaverMaxTokens, DEFAULT_COST_SAVER_MAX_TOKENS, 32);
+    const existingMaxTokens = Number(inferenceConfig.maxTokens);
+
+    optionState.costSaver.sent = true;
+    optionState.costSaver.maxTokens = maxTokens;
+    optionState.costSaver.reason = null;
+
+    if (!Number.isFinite(existingMaxTokens) || existingMaxTokens > maxTokens) {
+        inferenceConfig.maxTokens = maxTokens;
+        optionState.requestAdjustments.push(`Cost Saver가 최대 출력 토큰을 ${maxTokens}으로 제한했습니다.`);
+    }
+
+    if (optionState.thinking.sent) {
+        optionState.thinking.sent = false;
+        optionState.thinking.type = null;
+        optionState.thinking.effort = null;
+        optionState.thinking.reason = 'Cost Saver 모드가 thinking을 비활성화했습니다.';
+        optionState.costSaver.disabledThinking = true;
+        optionState.requestAdjustments.push('Cost Saver가 reasoning 비용을 줄이기 위해 thinking 전송을 생략했습니다.');
+    }
+}
+
+function resolveModelPricing(modelId) {
+    return MODEL_PRICING.find(entry => entry.pattern.test(modelId || '')) || null;
+}
+
+function estimateInvocationCost(modelId, usage, optionState) {
+    const normalizedUsage = toUsage(usage);
+    const pricing = resolveModelPricing(modelId);
+
+    if (!pricing || normalizedUsage.total_tokens <= 0) {
+        return null;
+    }
+
+    const promptCost = (normalizedUsage.prompt_tokens / 1_000_000) * pricing.inputPerMillionUsd;
+    const completionCost = (normalizedUsage.completion_tokens / 1_000_000) * pricing.outputPerMillionUsd;
+    const batchDiscountFactor = optionState?.batch?.sent ? 0.5 : 1;
+    const amountUsd = (promptCost + completionCost) * batchDiscountFactor;
+    const notes = [`${pricing.label} 대략 요율 기준`];
+
+    if (optionState?.batch?.sent) {
+        notes.push('batch 50% 할인 반영');
+    }
+
+    if (optionState?.caching?.sent) {
+        notes.push('caching 세부 토큰은 AWS usage에 없어서 표준 입력 단가 기준으로 추정');
+    }
+
+    return {
+        currency: 'USD',
+        amountUsd,
+        display: `$${amountUsd.toFixed(6)}`,
+        pricingModel: pricing.label,
+        inputPerMillionUsd: pricing.inputPerMillionUsd,
+        outputPerMillionUsd: pricing.outputPerMillionUsd,
+        note: notes.join(', '),
+    };
+}
+
+function parseS3Uri(uri) {
+    const normalized = normalizeS3Uri(uri);
+    if (!normalized) {
+        throw new Error('S3 URI 형식이 올바르지 않습니다. s3://bucket/prefix/ 형식으로 입력하세요.');
+    }
+
+    const withoutScheme = normalized.slice('s3://'.length);
+    const firstSlash = withoutScheme.indexOf('/');
+    const bucket = firstSlash === -1 ? withoutScheme : withoutScheme.slice(0, firstSlash);
+    const key = firstSlash === -1 ? '' : withoutScheme.slice(firstSlash + 1);
+
+    if (!bucket) {
+        throw new Error('S3 URI에 bucket 이름이 없습니다.');
+    }
+
+    return {
+        bucket,
+        key,
+    };
+}
+
+function joinS3Key(prefix, name) {
+    const trimmedPrefix = String(prefix || '').replace(/^\/+|\/+$/g, '');
+    const trimmedName = String(name || '').replace(/^\/+/, '');
+
+    if (!trimmedPrefix) {
+        return trimmedName;
+    }
+
+    return `${trimmedPrefix}/${trimmedName}`;
+}
+
+function toS3Uri(bucket, key) {
+    return `s3://${bucket}/${String(key || '').replace(/^\/+/, '')}`;
+}
+
+function createBatchRecord(input, recordId) {
+    const modelInput = cloneDocument(input);
+    delete modelInput.modelId;
+
+    return {
+        recordId,
+        modelInput,
+    };
+}
+
+async function streamToString(body) {
+    if (!body) {
+        return '';
+    }
+
+    const chunks = [];
+    for await (const chunk of body) {
+        chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk));
+    }
+
+    return Buffer.concat(chunks).toString('utf8');
+}
+
+function parseJsonLines(text) {
+    return String(text || '')
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => JSON.parse(line));
+}
+
+function extractJobIdentifier(jobArn) {
+    const value = String(jobArn || '');
+    const slashIndex = value.lastIndexOf('/');
+    const colonIndex = value.lastIndexOf(':');
+    const index = Math.max(slashIndex, colonIndex);
+    return index >= 0 ? value.slice(index + 1) : value;
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function validateBatchConfig(config) {
+    if (!config.batchEnabled) {
+        return;
+    }
+
+    if (!config.batchInputS3Uri || !config.batchOutputS3Uri || !config.batchRoleArn) {
+        throw new Error('Batch inference가 ON이면 Batch Input S3 Prefix, Batch Output S3 Prefix, Batch Service Role ARN이 모두 필요합니다.');
+    }
+}
+
+async function uploadBatchInputFile(s3, config, input, recordId, jobName) {
+    const inputLocation = parseS3Uri(config.batchInputS3Uri);
+    const inputKey = joinS3Key(inputLocation.key, `${jobName}.jsonl`);
+    const body = `${JSON.stringify(createBatchRecord(input, recordId))}\n`;
+
+    await s3.send(new PutObjectCommand({
+        Bucket: inputLocation.bucket,
+        Key: inputKey,
+        Body: body,
+        ContentType: 'application/x-jsonlines',
+    }));
+
+    return {
+        bucket: inputLocation.bucket,
+        key: inputKey,
+        s3Uri: toS3Uri(inputLocation.bucket, inputKey),
+        fileName: path.posix.basename(inputKey),
+    };
+}
+
+async function createBatchInferenceJob(bedrock, config, invocationModelId, inputS3Uri, jobName) {
+    const command = new CreateModelInvocationJobCommand({
+        jobName,
+        clientRequestToken: jobName,
+        modelId: invocationModelId,
+        roleArn: config.batchRoleArn,
+        inputDataConfig: {
+            s3InputDataConfig: {
+                s3InputFormat: 'JSONL',
+                s3Uri: inputS3Uri,
+            },
+        },
+        outputDataConfig: {
+            s3OutputDataConfig: {
+                s3Uri: config.batchOutputS3Uri,
+                ...(config.batchKmsKeyId ? { s3EncryptionKeyId: config.batchKmsKeyId } : {}),
+            },
+        },
+        timeoutDurationInHours: 24,
+        modelInvocationType: 'Converse',
+    });
+
+    return await bedrock.send(command);
+}
+
+async function waitForBatchJobCompletion(bedrock, jobIdentifier) {
+    const startedAt = Date.now();
+
+    while ((Date.now() - startedAt) < BATCH_MAX_WAIT_MS) {
+        const job = await bedrock.send(new GetModelInvocationJobCommand({ jobIdentifier }));
+        const status = String(job.status || '');
+
+        if (/completed/i.test(status)) {
+            return job;
+        }
+
+        if (/failed|stopped|expired/i.test(status)) {
+            throw new Error(job.message || `Batch inference job failed with status ${status}.`);
+        }
+
+        await sleep(BATCH_POLL_INTERVAL_MS);
+    }
+
+    throw new Error('Batch inference job 대기 시간이 초과되었습니다. AWS 콘솔 또는 S3 출력 경로에서 진행 상태를 확인하세요.');
+}
+
+async function readBatchOutputRecord(s3, outputS3Uri, jobArn, expectedRecordId) {
+    const outputLocation = parseS3Uri(outputS3Uri);
+    const jobIdentifier = extractJobIdentifier(jobArn);
+    const prefix = joinS3Key(outputLocation.key, jobIdentifier);
+    const listing = await s3.send(new ListObjectsV2Command({
+        Bucket: outputLocation.bucket,
+        Prefix: prefix,
+    }));
+
+    const contents = Array.isArray(listing.Contents) ? listing.Contents : [];
+    const outputObject = contents.find(item => item.Key?.endsWith('.out'));
+    const errorObject = contents.find(item => item.Key?.endsWith('.err'));
+
+    if (outputObject?.Key) {
+        const response = await s3.send(new GetObjectCommand({
+            Bucket: outputLocation.bucket,
+            Key: outputObject.Key,
+        }));
+        const rows = parseJsonLines(await streamToString(response.Body));
+        const record = rows.find(item => item.recordId === expectedRecordId) || rows[0];
+
+        if (record?.error) {
+            throw new Error(record.error.errorMessage || `Batch inference record failed (${record.error.errorCode || 'unknown'}).`);
+        }
+
+        if (record?.modelOutput) {
+            return record;
+        }
+    }
+
+    if (errorObject?.Key) {
+        const response = await s3.send(new GetObjectCommand({
+            Bucket: outputLocation.bucket,
+            Key: errorObject.Key,
+        }));
+        const rows = parseJsonLines(await streamToString(response.Body));
+        const record = rows.find(item => item.recordId === expectedRecordId) || rows[0];
+        if (record?.error) {
+            throw new Error(record.error.errorMessage || `Batch inference record failed (${record.error.errorCode || 'unknown'}).`);
+        }
+    }
+
+    throw new Error('Batch inference 출력 파일에서 결과를 찾지 못했습니다.');
+}
+
+async function runBatchInference({ bedrock, s3, config, input, invocationModelId, requestedModelId, optionState }) {
+    validateBatchConfig(config);
+
+    const recordId = `st-${Date.now()}`;
+    const jobName = `st-bedrock-${Date.now()}`;
+    const uploadedInput = await uploadBatchInputFile(s3, config, input, recordId, jobName);
+    const createdJob = await createBatchInferenceJob(bedrock, config, invocationModelId, uploadedInput.s3Uri, jobName);
+    const jobArn = createdJob.jobArn || createdJob.arn || createdJob.jobIdentifier || jobName;
+
+    optionState.batch.sent = true;
+    optionState.batch.jobArn = jobArn;
+    optionState.batch.status = createdJob.status || 'Submitted';
+    optionState.batch.reason = null;
+
+    const completedJob = await waitForBatchJobCompletion(bedrock, jobArn);
+    optionState.batch.status = completedJob.status || optionState.batch.status;
+
+    const outputS3Uri = completedJob.outputDataConfig?.s3OutputDataConfig?.s3Uri || config.batchOutputS3Uri;
+    const record = await readBatchOutputRecord(s3, outputS3Uri, jobArn, recordId);
+    return {
+        response: record.modelOutput,
+        requestedModelId: requestedModelId || invocationModelId,
+        invocationModelId,
+        jobArn,
+        jobStatus: optionState.batch.status,
+    };
+}
+
 function buildConverseInput(body, config) {
     const { system, messages } = convertMessages(body.messages);
     const inferenceConfig = {};
     const requestedModelId = typeof body.model === 'string' ? body.model.trim() : '';
     const invocationModelId = config.inferenceProfileId || requestedModelId;
+    const resolvedMaxTokens = resolveMaxTokens(body);
 
-    if (Number.isFinite(body.max_tokens) && body.max_tokens > 0) {
-        inferenceConfig.maxTokens = Math.floor(body.max_tokens);
+    if (Number.isFinite(resolvedMaxTokens) && resolvedMaxTokens > 0) {
+        inferenceConfig.maxTokens = resolvedMaxTokens;
     }
 
     if (Array.isArray(body.stop) && body.stop.length > 0) {
@@ -505,6 +960,9 @@ function buildConverseInput(body, config) {
         input.system = system;
     }
 
+    applyCostSaver(inferenceConfig, optionState, config);
+    applyPromptCaching(input, optionState);
+
     if (Object.keys(inferenceConfig).length > 0) {
         input.inferenceConfig = inferenceConfig;
     }
@@ -527,7 +985,7 @@ function buildConverseInput(body, config) {
     return { input, optionState, requestedModelId, invocationModelId };
 }
 
-function buildChatCompletionResponse(modelId, text, stopReason, usage) {
+function buildChatCompletionResponse(modelId, text, stopReason, usage, costEstimate = null) {
     const created = Math.floor(Date.now() / 1000);
     return {
         id: `chatcmpl-bedrock-${Date.now()}`,
@@ -545,6 +1003,8 @@ function buildChatCompletionResponse(modelId, text, stopReason, usage) {
             },
         ],
         usage: toUsage(usage),
+        bedrock_cost_estimate_usd: costEstimate?.amountUsd ?? null,
+        bedrock_cost_estimate_display: costEstimate?.display ?? null,
     };
 }
 
@@ -559,6 +1019,7 @@ function writeSseDone(res) {
 function buildInvocationSummary({ source, region, requestedModelId, invocationModelId, config, optionState, response, stream = false }) {
     const outputContent = response?.output?.message?.content;
     const reasoning = extractReasoningDetails(outputContent);
+    const costEstimate = response ? estimateInvocationCost(requestedModelId || invocationModelId, response.usage, optionState) : null;
     return {
         source,
         requestedAt: new Date().toISOString(),
@@ -570,6 +1031,10 @@ function buildInvocationSummary({ source, region, requestedModelId, invocationMo
             inferenceProfileId: config.inferenceProfileId,
             thinkingEffort: config.thinkingEffort,
             serviceTier: config.serviceTier,
+            costSaverEnabled: config.costSaverEnabled,
+            costSaverMaxTokens: config.costSaverMaxTokens,
+            cachingEnabled: config.cachingEnabled,
+            batchEnabled: config.batchEnabled,
         },
         applied: optionState,
         response: response ? {
@@ -583,6 +1048,7 @@ function buildInvocationSummary({ source, region, requestedModelId, invocationMo
             reasoningRedacted: reasoning.redacted,
             reasoningPreview: reasoning.preview,
             usage: toUsage(response.usage),
+            costEstimate,
             additionalModelResponseFields: response.additionalModelResponseFields || null,
             textPreview: extractTextContent(outputContent).slice(0, 160),
         } : {
@@ -596,6 +1062,7 @@ function buildInvocationSummary({ source, region, requestedModelId, invocationMo
             reasoningRedacted: false,
             reasoningPreview: '',
             usage: null,
+            costEstimate: null,
             additionalModelResponseFields: null,
             textPreview: '',
         },
@@ -806,11 +1273,41 @@ async function handleChatCompletion(req, res) {
     }
 
     const region = config.region || DEFAULT_REGION;
-    const { runtime } = createBedrockClients(directories, region);
+    const { bedrock, runtime, s3 } = createBedrockClients(directories, region);
     const { input, optionState, requestedModelId, invocationModelId } = buildConverseInput(req.body || {}, config);
 
     if (!requestedModelId && !invocationModelId) {
         return res.status(400).send({ error: { message: 'model is required.' } });
+    }
+
+    if (config.batchEnabled && req.body?.stream) {
+        return res.status(400).send({ error: { message: 'Batch inference가 ON이면 stream=false여야 합니다.' } });
+    }
+
+    if (config.batchEnabled) {
+        const batchResult = await runBatchInference({
+            bedrock,
+            s3,
+            config,
+            input,
+            invocationModelId,
+            requestedModelId,
+            optionState,
+        });
+
+        setLastInvocation(directories, buildInvocationSummary({
+            source: 'chat-batch',
+            region,
+            requestedModelId,
+            invocationModelId,
+            config,
+            optionState,
+            response: batchResult.response,
+        }));
+
+        const text = extractTextContent(batchResult.response.output?.message?.content);
+        const costEstimate = estimateInvocationCost(requestedModelId || invocationModelId, batchResult.response.usage, optionState);
+        return res.send(buildChatCompletionResponse(requestedModelId || invocationModelId, text, batchResult.response.stopReason, batchResult.response.usage, costEstimate));
     }
 
     if (req.body?.stream) {
@@ -907,7 +1404,8 @@ async function handleChatCompletion(req, res) {
         response,
     }));
     const text = extractTextContent(response.output?.message?.content);
-    return res.send(buildChatCompletionResponse(requestedModelId || invocationModelId, text, response.stopReason, response.usage));
+    const costEstimate = estimateInvocationCost(requestedModelId || invocationModelId, response.usage, result.optionState);
+    return res.send(buildChatCompletionResponse(requestedModelId || invocationModelId, text, response.stopReason, response.usage, costEstimate));
 }
 
 function buildConfigResponse(directories) {
@@ -920,6 +1418,14 @@ function buildConfigResponse(directories) {
         inferenceProfileId: config.inferenceProfileId,
         thinkingEffort: config.thinkingEffort,
         serviceTier: config.serviceTier,
+        costSaverEnabled: config.costSaverEnabled,
+        costSaverMaxTokens: config.costSaverMaxTokens,
+        cachingEnabled: config.cachingEnabled,
+        batchEnabled: config.batchEnabled,
+        batchInputS3Uri: config.batchInputS3Uri,
+        batchOutputS3Uri: config.batchOutputS3Uri,
+        batchRoleArn: config.batchRoleArn,
+        batchKmsKeyId: config.batchKmsKeyId,
         configured: hasCredentials(credentials),
         hasAccessKeyId: Boolean(credentials.accessKeyId),
         hasSecretAccessKey: Boolean(credentials.secretAccessKey),
@@ -995,6 +1501,14 @@ export async function init(router) {
             inferenceProfileId: typeof body.inferenceProfileId === 'string' ? body.inferenceProfileId.trim() : currentConfig.inferenceProfileId,
             thinkingEffort: body.thinkingEffort,
             serviceTier: body.serviceTier,
+            costSaverEnabled: body.costSaverEnabled,
+            costSaverMaxTokens: body.costSaverMaxTokens,
+            cachingEnabled: body.cachingEnabled,
+            batchEnabled: body.batchEnabled,
+            batchInputS3Uri: typeof body.batchInputS3Uri === 'string' ? body.batchInputS3Uri.trim() : currentConfig.batchInputS3Uri,
+            batchOutputS3Uri: typeof body.batchOutputS3Uri === 'string' ? body.batchOutputS3Uri.trim() : currentConfig.batchOutputS3Uri,
+            batchRoleArn: typeof body.batchRoleArn === 'string' ? body.batchRoleArn.trim() : currentConfig.batchRoleArn,
+            batchKmsKeyId: typeof body.batchKmsKeyId === 'string' ? body.batchKmsKeyId.trim() : currentConfig.batchKmsKeyId,
         });
 
         res.send({ ...buildConfigResponse(req.user.directories), ...nextConfig });

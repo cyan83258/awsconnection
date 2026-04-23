@@ -70,6 +70,45 @@
                 <option value="flex">flex</option>
             </select>
 
+            <label class="aws-bedrock-toggle" for="aws_bedrock_cost_saver_enabled">
+                <input id="aws_bedrock_cost_saver_enabled" type="checkbox">
+                <span>Cost Saver 모드</span>
+            </label>
+            <div class="aws-bedrock-note aws-bedrock-subnote">
+                ON이면 thinking을 끄고 최대 출력 토큰을 상한으로 제한해 응답당 비용을 더 줄입니다.
+            </div>
+
+            <label for="aws_bedrock_cost_saver_max_tokens">Cost Saver 최대 출력 토큰</label>
+            <input id="aws_bedrock_cost_saver_max_tokens" class="text_pole" type="number" min="32" step="1" placeholder="예: 512">
+
+            <label class="aws-bedrock-toggle" for="aws_bedrock_caching_enabled">
+                <input id="aws_bedrock_caching_enabled" type="checkbox">
+                <span>Prompt Caching 활성화</span>
+            </label>
+            <div class="aws-bedrock-note aws-bedrock-subnote">
+                ON이면 Converse 요청의 재사용 가능한 prefix에 cache checkpoint를 넣어 prompt caching을 시도합니다.
+            </div>
+
+            <label class="aws-bedrock-toggle" for="aws_bedrock_batch_enabled">
+                <input id="aws_bedrock_batch_enabled" type="checkbox">
+                <span>Batch Inference 활성화</span>
+            </label>
+            <div class="aws-bedrock-note aws-bedrock-subnote">
+                ON이면 비스트리밍 요청을 Bedrock batch inference job으로 제출하고 완료될 때까지 기다립니다. 입력/출력 S3 경로와 service role ARN이 필요합니다.
+            </div>
+
+            <label for="aws_bedrock_batch_input_s3_uri">Batch Input S3 Prefix</label>
+            <input id="aws_bedrock_batch_input_s3_uri" class="text_pole" type="text" placeholder="예: s3://my-bedrock-batch/input/">
+
+            <label for="aws_bedrock_batch_output_s3_uri">Batch Output S3 Prefix</label>
+            <input id="aws_bedrock_batch_output_s3_uri" class="text_pole" type="text" placeholder="예: s3://my-bedrock-batch/output/">
+
+            <label for="aws_bedrock_batch_role_arn">Batch Service Role ARN</label>
+            <input id="aws_bedrock_batch_role_arn" class="text_pole" type="text" placeholder="예: arn:aws:iam::123456789012:role/bedrock-batch-role">
+
+            <label for="aws_bedrock_batch_kms_key_id">Batch Output KMS Key ID (optional)</label>
+            <input id="aws_bedrock_batch_kms_key_id" class="text_pole" type="text" placeholder="예: arn:aws:kms:us-east-1:123456789012:key/...">
+
             <div class="aws-bedrock-actions">
                 <button id="aws_bedrock_apply" class="menu_button">SillyTavern에 적용</button>
                 <button id="aws_bedrock_connect" class="menu_button">연결 확인</button>
@@ -94,6 +133,18 @@
                     <strong id="aws_bedrock_inspect_service_tier">-</strong>
                 </div>
                 <div class="aws-bedrock-inspect-row">
+                    <span>저장된 Cost Saver</span>
+                    <strong id="aws_bedrock_inspect_cost_saver">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>저장된 Caching</span>
+                    <strong id="aws_bedrock_inspect_caching">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>저장된 Batch</span>
+                    <strong id="aws_bedrock_inspect_batch">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
                     <span>마지막 검사 시각</span>
                     <strong id="aws_bedrock_inspect_time">-</strong>
                 </div>
@@ -108,6 +159,26 @@
                 <div class="aws-bedrock-inspect-row">
                     <span>Service Tier 응답</span>
                     <strong id="aws_bedrock_inspect_service_tier_applied">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>Cost Saver 적용</span>
+                    <strong id="aws_bedrock_inspect_cost_saver_applied">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>Caching 적용</span>
+                    <strong id="aws_bedrock_inspect_caching_applied">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>Batch 적용</span>
+                    <strong id="aws_bedrock_inspect_batch_applied">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>최근 사용 토큰</span>
+                    <strong id="aws_bedrock_inspect_usage">-</strong>
+                </div>
+                <div class="aws-bedrock-inspect-row">
+                    <span>최근 응답 예상 비용</span>
+                    <strong id="aws_bedrock_inspect_cost_estimate">-</strong>
                 </div>
                 <div class="aws-bedrock-inspect-row">
                     <span>Reasoning 감지</span>

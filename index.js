@@ -22,7 +22,18 @@ const defaultSettings = {
     inferenceProfileId: '',
     thinkingEffort: 'high',
     serviceTier: 'default',
+    costSaverEnabled: false,
+    costSaverMaxTokens: 512,
+    cachingEnabled: false,
+    batchEnabled: false,
+    batchInputS3Uri: '',
+    batchOutputS3Uri: '',
+    batchRoleArn: '',
+    batchKmsKeyId: '',
 };
+let inspectionPollTimer = null;
+let inspectionRefreshInFlight = false;
+let lastRenderedInvocationAt = '';
 
 const fallbackModels = [
     'anthropic.claude-3-5-haiku-20241022-v1:0',
@@ -59,6 +70,14 @@ function loadSettings() {
     $('#aws_bedrock_inference_profile_id').val(extensionSettings.inferenceProfileId || defaultSettings.inferenceProfileId);
     $('#aws_bedrock_thinking_effort').val(extensionSettings.thinkingEffort || defaultSettings.thinkingEffort);
     $('#aws_bedrock_service_tier').val(extensionSettings.serviceTier || defaultSettings.serviceTier);
+    $('#aws_bedrock_cost_saver_enabled').prop('checked', extensionSettings.costSaverEnabled === true);
+    $('#aws_bedrock_cost_saver_max_tokens').val(extensionSettings.costSaverMaxTokens || defaultSettings.costSaverMaxTokens);
+    $('#aws_bedrock_caching_enabled').prop('checked', extensionSettings.cachingEnabled === true);
+    $('#aws_bedrock_batch_enabled').prop('checked', extensionSettings.batchEnabled === true);
+    $('#aws_bedrock_batch_input_s3_uri').val(extensionSettings.batchInputS3Uri || defaultSettings.batchInputS3Uri);
+    $('#aws_bedrock_batch_output_s3_uri').val(extensionSettings.batchOutputS3Uri || defaultSettings.batchOutputS3Uri);
+    $('#aws_bedrock_batch_role_arn').val(extensionSettings.batchRoleArn || defaultSettings.batchRoleArn);
+    $('#aws_bedrock_batch_kms_key_id').val(extensionSettings.batchKmsKeyId || defaultSettings.batchKmsKeyId);
     $('#aws_bedrock_endpoint').val(getBridgeUrl());
 }
 
@@ -69,6 +88,14 @@ function saveExtensionSettings() {
     extensionSettings.inferenceProfileId = String($('#aws_bedrock_inference_profile_id').val() || '').trim();
     extensionSettings.thinkingEffort = String($('#aws_bedrock_thinking_effort').val() || defaultSettings.thinkingEffort).trim() || defaultSettings.thinkingEffort;
     extensionSettings.serviceTier = String($('#aws_bedrock_service_tier').val() || defaultSettings.serviceTier).trim() || defaultSettings.serviceTier;
+    extensionSettings.costSaverEnabled = $('#aws_bedrock_cost_saver_enabled').is(':checked');
+    extensionSettings.costSaverMaxTokens = Math.max(32, Number.parseInt(String($('#aws_bedrock_cost_saver_max_tokens').val() || defaultSettings.costSaverMaxTokens), 10) || defaultSettings.costSaverMaxTokens);
+    extensionSettings.cachingEnabled = $('#aws_bedrock_caching_enabled').is(':checked');
+    extensionSettings.batchEnabled = $('#aws_bedrock_batch_enabled').is(':checked');
+    extensionSettings.batchInputS3Uri = String($('#aws_bedrock_batch_input_s3_uri').val() || '').trim();
+    extensionSettings.batchOutputS3Uri = String($('#aws_bedrock_batch_output_s3_uri').val() || '').trim();
+    extensionSettings.batchRoleArn = String($('#aws_bedrock_batch_role_arn').val() || '').trim();
+    extensionSettings.batchKmsKeyId = String($('#aws_bedrock_batch_kms_key_id').val() || '').trim();
     saveSettingsDebounced();
 }
 
@@ -101,6 +128,14 @@ async function syncPluginConfig() {
             inferenceProfileId: extensionSettings.inferenceProfileId,
             thinkingEffort: extensionSettings.thinkingEffort,
             serviceTier: extensionSettings.serviceTier,
+            costSaverEnabled: extensionSettings.costSaverEnabled,
+            costSaverMaxTokens: extensionSettings.costSaverMaxTokens,
+            cachingEnabled: extensionSettings.cachingEnabled,
+            batchEnabled: extensionSettings.batchEnabled,
+            batchInputS3Uri: extensionSettings.batchInputS3Uri,
+            batchOutputS3Uri: extensionSettings.batchOutputS3Uri,
+            batchRoleArn: extensionSettings.batchRoleArn,
+            batchKmsKeyId: extensionSettings.batchKmsKeyId,
         },
     });
 }
@@ -186,15 +221,22 @@ function renderInspection(payload) {
     const appliedThinking = lastInvocation?.applied?.thinking;
     const appliedServiceTier = lastInvocation?.response?.serviceTier || lastInvocation?.applied?.serviceTier?.type || null;
     const requestedServiceTier = lastInvocation?.applied?.serviceTier?.type || config.serviceTier || defaultSettings.serviceTier;
+    const appliedCostSaver = lastInvocation?.applied?.costSaver;
     const reasoningDetected = lastInvocation?.response?.reasoningDetected;
     const reasoningBlockCount = lastInvocation?.response?.reasoningBlockCount || 0;
     const reasoningSignatureDetected = lastInvocation?.response?.reasoningSignatureDetected;
     const reasoningPreview = lastInvocation?.response?.reasoningPreview || '';
+    const usage = lastInvocation?.response?.usage || null;
+    const costEstimate = lastInvocation?.response?.costEstimate || null;
     const noteParts = [];
+    const invocationAt = String(lastInvocation?.requestedAt || '');
 
     $('#aws_bedrock_inspect_enabled').text(config.enabled === false ? 'OFF' : 'ON');
     $('#aws_bedrock_inspect_thinking').text(config.thinkingEffort || defaultSettings.thinkingEffort);
     $('#aws_bedrock_inspect_service_tier').text(config.serviceTier || defaultSettings.serviceTier);
+    $('#aws_bedrock_inspect_cost_saver').text(config.costSaverEnabled ? `ON (${config.costSaverMaxTokens || defaultSettings.costSaverMaxTokens})` : 'OFF');
+    $('#aws_bedrock_inspect_caching').text(config.cachingEnabled ? 'ON' : 'OFF');
+    $('#aws_bedrock_inspect_batch').text(config.batchEnabled ? 'ON' : 'OFF');
     $('#aws_bedrock_inspect_time').text(formatDateTime(lastInvocation?.requestedAt));
     $('#aws_bedrock_inspect_model').text(lastInvocation?.modelId || config.selectedModel || '-');
 
@@ -205,6 +247,11 @@ function renderInspection(payload) {
     }
 
     $('#aws_bedrock_inspect_service_tier_applied').text(appliedServiceTier ? `요청 ${requestedServiceTier} / 응답 ${appliedServiceTier}` : `요청 ${requestedServiceTier} / 응답 미확인`);
+    $('#aws_bedrock_inspect_cost_saver_applied').text(appliedCostSaver?.sent ? `max ${appliedCostSaver.maxTokens || config.costSaverMaxTokens || defaultSettings.costSaverMaxTokens}` : (appliedCostSaver?.reason || 'OFF'));
+    $('#aws_bedrock_inspect_caching_applied').text(lastInvocation?.applied?.caching?.sent ? `checkpoint ${lastInvocation.applied.caching.checkpointCount || 0}개` : (lastInvocation?.applied?.caching?.reason || '전송 기록 없음'));
+    $('#aws_bedrock_inspect_batch_applied').text(lastInvocation?.applied?.batch?.sent ? (lastInvocation.applied.batch.jobArn || 'job 제출됨') : (lastInvocation?.applied?.batch?.reason || 'OFF'));
+    $('#aws_bedrock_inspect_usage').text(usage ? `in ${usage.prompt_tokens || 0} / out ${usage.completion_tokens || 0}` : '-');
+    $('#aws_bedrock_inspect_cost_estimate').text(costEstimate?.display || '가격표 미설정 또는 사용량 없음');
     $('#aws_bedrock_inspect_reasoning').text(reasoningDetected ? `감지됨 (${reasoningBlockCount}개)` : '감지 안 됨');
     $('#aws_bedrock_inspect_reasoning_signature').text(reasoningDetected ? (reasoningSignatureDetected ? '있음' : '없음') : '-');
     $('#aws_bedrock_inspect_reasoning_preview').text(reasoningPreview || 'adaptive thinking은 effort가 낮거나 질문이 단순하면 reasoning을 생략할 수 있습니다.');
@@ -236,6 +283,24 @@ function renderInspection(payload) {
         noteParts.push(`service tier 요청값: ${requestedServiceTier}`);
     }
 
+    if (appliedCostSaver?.sent) {
+        noteParts.push(`cost saver max tokens: ${appliedCostSaver.maxTokens}`);
+    } else if (appliedCostSaver?.reason) {
+        noteParts.push(appliedCostSaver.reason);
+    }
+
+    if (lastInvocation?.applied?.caching?.sent) {
+        noteParts.push(`caching checkpoint: ${lastInvocation.applied.caching.checkpointCount || 0}개`);
+    } else if (lastInvocation?.applied?.caching?.reason) {
+        noteParts.push(lastInvocation.applied.caching.reason);
+    }
+
+    if (lastInvocation?.applied?.batch?.sent) {
+        noteParts.push(`batch job: ${lastInvocation.applied.batch.jobArn || 'submitted'}`);
+    } else if (lastInvocation?.applied?.batch?.reason) {
+        noteParts.push(lastInvocation.applied.batch.reason);
+    }
+
     if (appliedServiceTier) {
         noteParts.push(`service tier 응답값: ${appliedServiceTier}`);
     } else if (requestedServiceTier) {
@@ -258,11 +323,49 @@ function renderInspection(payload) {
         noteParts.push(`미리보기: ${lastInvocation.response.textPreview}`);
     }
 
+    if (costEstimate?.display) {
+        noteParts.push(`예상 비용: ${costEstimate.display}`);
+    }
+
+    if (costEstimate?.note) {
+        noteParts.push(costEstimate.note);
+    }
+
     if (Array.isArray(lastInvocation?.applied?.requestAdjustments) && lastInvocation.applied.requestAdjustments.length > 0) {
         noteParts.push(...lastInvocation.applied.requestAdjustments);
     }
 
     $('#aws_bedrock_inspect_note').text(noteParts.length > 0 ? noteParts.join(' | ') : '아직 검사 기록이 없습니다.');
+
+    if (invocationAt && invocationAt !== lastRenderedInvocationAt) {
+        lastRenderedInvocationAt = invocationAt;
+        if (costEstimate?.display) {
+            setStatus(`마지막 응답 예상 비용: ${costEstimate.display}`);
+        }
+    }
+}
+
+async function refreshInspectionSilently() {
+    if (inspectionRefreshInFlight) {
+        return;
+    }
+
+    inspectionRefreshInFlight = true;
+    try {
+        await refreshInspection(false);
+    } catch {
+        // Ignore polling failures; explicit actions already surface errors.
+    } finally {
+        inspectionRefreshInFlight = false;
+    }
+}
+
+function startInspectionPolling() {
+    if (inspectionPollTimer !== null) {
+        window.clearInterval(inspectionPollTimer);
+    }
+
+    inspectionPollTimer = window.setInterval(refreshInspectionSilently, 15000);
 }
 
 async function fetchPlugin(path, options = {}) {
@@ -320,11 +423,27 @@ async function loadConfig() {
         extensionSettings.inferenceProfileId = config.inferenceProfileId || extensionSettings.inferenceProfileId || defaultSettings.inferenceProfileId;
         extensionSettings.thinkingEffort = config.thinkingEffort || extensionSettings.thinkingEffort || defaultSettings.thinkingEffort;
         extensionSettings.serviceTier = config.serviceTier || extensionSettings.serviceTier || defaultSettings.serviceTier;
+        extensionSettings.costSaverEnabled = config.costSaverEnabled === true;
+        extensionSettings.costSaverMaxTokens = Number(config.costSaverMaxTokens) || extensionSettings.costSaverMaxTokens || defaultSettings.costSaverMaxTokens;
+        extensionSettings.cachingEnabled = config.cachingEnabled === true;
+        extensionSettings.batchEnabled = config.batchEnabled === true;
+        extensionSettings.batchInputS3Uri = config.batchInputS3Uri || extensionSettings.batchInputS3Uri || defaultSettings.batchInputS3Uri;
+        extensionSettings.batchOutputS3Uri = config.batchOutputS3Uri || extensionSettings.batchOutputS3Uri || defaultSettings.batchOutputS3Uri;
+        extensionSettings.batchRoleArn = config.batchRoleArn || extensionSettings.batchRoleArn || defaultSettings.batchRoleArn;
+        extensionSettings.batchKmsKeyId = config.batchKmsKeyId || extensionSettings.batchKmsKeyId || defaultSettings.batchKmsKeyId;
         $('#aws_bedrock_region').val(extensionSettings.region);
         $('#aws_bedrock_enabled').prop('checked', extensionSettings.enabled);
         $('#aws_bedrock_inference_profile_id').val(extensionSettings.inferenceProfileId);
         $('#aws_bedrock_thinking_effort').val(extensionSettings.thinkingEffort);
         $('#aws_bedrock_service_tier').val(extensionSettings.serviceTier);
+        $('#aws_bedrock_cost_saver_enabled').prop('checked', extensionSettings.costSaverEnabled);
+        $('#aws_bedrock_cost_saver_max_tokens').val(extensionSettings.costSaverMaxTokens);
+        $('#aws_bedrock_caching_enabled').prop('checked', extensionSettings.cachingEnabled);
+        $('#aws_bedrock_batch_enabled').prop('checked', extensionSettings.batchEnabled);
+        $('#aws_bedrock_batch_input_s3_uri').val(extensionSettings.batchInputS3Uri);
+        $('#aws_bedrock_batch_output_s3_uri').val(extensionSettings.batchOutputS3Uri);
+        $('#aws_bedrock_batch_role_arn').val(extensionSettings.batchRoleArn);
+        $('#aws_bedrock_batch_kms_key_id').val(extensionSettings.batchKmsKeyId);
         renderCredentialState(config);
         populateFallbackModels();
         saveSettingsDebounced();
@@ -401,6 +520,14 @@ async function saveCredentials() {
             inferenceProfileId: extensionSettings.inferenceProfileId,
             thinkingEffort: extensionSettings.thinkingEffort,
             serviceTier: extensionSettings.serviceTier,
+            costSaverEnabled: extensionSettings.costSaverEnabled,
+            costSaverMaxTokens: extensionSettings.costSaverMaxTokens,
+            cachingEnabled: extensionSettings.cachingEnabled,
+            batchEnabled: extensionSettings.batchEnabled,
+            batchInputS3Uri: extensionSettings.batchInputS3Uri,
+            batchOutputS3Uri: extensionSettings.batchOutputS3Uri,
+            batchRoleArn: extensionSettings.batchRoleArn,
+            batchKmsKeyId: extensionSettings.batchKmsKeyId,
         };
 
         const accessKeyId = String($('#aws_bedrock_access_key_id').val() || '').trim();
@@ -431,7 +558,9 @@ async function saveCredentials() {
         renderInspection({ config });
         await refreshInspection(false);
         const tokenMessage = config.hasSessionToken ? 'Session Token도 함께 저장했습니다.' : 'Session Token은 비워 둔 상태로 저장했습니다.';
-        setStatus(extensionSettings.inferenceProfileId ? `AWS 자격 증명과 Bedrock 옵션을 저장했습니다. ${tokenMessage} inference profile이 실제 호출에 사용됩니다.` : `AWS 자격 증명과 Bedrock 옵션을 저장했습니다. ${tokenMessage}`);
+        const batchMessage = extensionSettings.batchEnabled ? ' Batch inference를 켠 경우 SillyTavern 요청은 stream=false여야 합니다.' : '';
+        const saverMessage = extensionSettings.costSaverEnabled ? ` Cost Saver는 최대 ${extensionSettings.costSaverMaxTokens} 토큰으로 제한합니다.` : '';
+        setStatus(extensionSettings.inferenceProfileId ? `AWS 자격 증명과 Bedrock 옵션을 저장했습니다. ${tokenMessage} inference profile이 실제 호출에 사용됩니다.${batchMessage}${saverMessage}` : `AWS 자격 증명과 Bedrock 옵션을 저장했습니다. ${tokenMessage}${batchMessage}${saverMessage}`);
     } catch (error) {
         setStatus(`저장 실패: ${error.message}`, true);
     }
@@ -449,6 +578,14 @@ async function clearCredentials() {
                 inferenceProfileId: extensionSettings.inferenceProfileId,
                 thinkingEffort: extensionSettings.thinkingEffort,
                 serviceTier: extensionSettings.serviceTier,
+                costSaverEnabled: extensionSettings.costSaverEnabled,
+                costSaverMaxTokens: extensionSettings.costSaverMaxTokens,
+                cachingEnabled: extensionSettings.cachingEnabled,
+                batchEnabled: extensionSettings.batchEnabled,
+                batchInputS3Uri: extensionSettings.batchInputS3Uri,
+                batchOutputS3Uri: extensionSettings.batchOutputS3Uri,
+                batchRoleArn: extensionSettings.batchRoleArn,
+                batchKmsKeyId: extensionSettings.batchKmsKeyId,
                 clearCredentials: true,
             },
         });
@@ -510,7 +647,12 @@ function applyToSillyTavern() {
     }
 
     saveSettingsDebounced();
-    setStatus(extensionSettings.enabled ? 'OpenAI Custom provider에 Bedrock 브리지를 적용했습니다.' : '연결은 OFF 상태로 저장되었고, ON으로 바꾸기 전까지 실제 호출은 차단됩니다.');
+    if (extensionSettings.enabled) {
+        const saverMessage = extensionSettings.costSaverEnabled ? ` Cost Saver max ${extensionSettings.costSaverMaxTokens}.` : '';
+        setStatus(extensionSettings.batchEnabled ? `OpenAI Custom provider에 Bedrock 브리지를 적용했습니다. Batch inference를 쓰려면 stream=false로 사용하세요.${saverMessage}` : `OpenAI Custom provider에 Bedrock 브리지를 적용했습니다.${saverMessage}`);
+    } else {
+        setStatus('연결은 OFF 상태로 저장되었고, ON으로 바꾸기 전까지 실제 호출은 차단됩니다.');
+    }
 }
 
 async function applyToSillyTavernAndSync() {
@@ -569,7 +711,7 @@ function registerEventHandlers() {
     $(document).off('click', '#aws_bedrock_connect').on('click', '#aws_bedrock_connect', connectOpenAiCustom);
     $(document).off('click', '#aws_bedrock_verify').on('click', '#aws_bedrock_verify', verifySettings);
     $(document).off('click', '#aws_bedrock_refresh_state').on('click', '#aws_bedrock_refresh_state', () => refreshInspection(true));
-    $(document).off('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier').on('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier', saveExtensionSettings);
+    $(document).off('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier, #aws_bedrock_cost_saver_enabled, #aws_bedrock_cost_saver_max_tokens, #aws_bedrock_caching_enabled, #aws_bedrock_batch_enabled, #aws_bedrock_batch_input_s3_uri, #aws_bedrock_batch_output_s3_uri, #aws_bedrock_batch_role_arn, #aws_bedrock_batch_kms_key_id').on('change input', '#aws_bedrock_enabled, #aws_bedrock_region, #aws_bedrock_model, #aws_bedrock_inference_profile_id, #aws_bedrock_thinking_effort, #aws_bedrock_service_tier, #aws_bedrock_cost_saver_enabled, #aws_bedrock_cost_saver_max_tokens, #aws_bedrock_caching_enabled, #aws_bedrock_batch_enabled, #aws_bedrock_batch_input_s3_uri, #aws_bedrock_batch_output_s3_uri, #aws_bedrock_batch_role_arn, #aws_bedrock_batch_kms_key_id', saveExtensionSettings);
 }
 
 function getSettingsContainer() {
@@ -607,6 +749,7 @@ jQuery(async () => {
         loadSettings();
         registerEventHandlers();
         await loadConfig();
+        startInspectionPolling();
     } catch (error) {
         console.error('AWS Bedrock Connection extension failed to initialize.', error);
     }

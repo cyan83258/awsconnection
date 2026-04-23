@@ -6,6 +6,7 @@
     "main": "index.js",
     "dependencies": {
         "@aws-sdk/client-bedrock": "^3.917.0",
-        "@aws-sdk/client-bedrock-runtime": "^3.917.0"
+        "@aws-sdk/client-bedrock-runtime": "^3.917.0",
+        "@aws-sdk/client-s3": "^3.917.0"
     }
 }
